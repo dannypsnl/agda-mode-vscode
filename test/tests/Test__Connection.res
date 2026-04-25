@@ -64,6 +64,39 @@ let findProbeByLocalPath = (
   )
 }
 
+let resourceFromRawPath = raw =>
+  switch Connection__URI.parse(raw) {
+  | FileURI(_, uri) => uri
+  }
+
+let observeProbeFlow = () => {
+  let events: array<Log.Connection.ProbeFlow.t> = []
+  let onProbeFlow = event => events->Array.push(event)
+  (events, onProbeFlow)
+}
+
+let probeFlowSnapshot = event =>
+  switch event {
+  | Log.Connection.ProbeFlow.CandidateResolveStarted(candidate) =>
+    "CandidateResolveStarted:" ++ Connection__Candidate.toString(candidate)
+  | Log.Connection.ProbeFlow.CandidateResolved(original, resource) =>
+    "CandidateResolved:" ++ Connection__Candidate.toString(original) ++ "->" ++ VSCode.Uri.toString(resource)
+  | Log.Connection.ProbeFlow.CandidateResolveFailed(original, commandError) =>
+    "CandidateResolveFailed:" ++
+    Connection__Candidate.toString(original) ++
+    "->" ++
+    Connection__Command.Error.toString(commandError)
+  | Log.Connection.ProbeFlow.ProbeStarted(resource) => "ProbeStarted:" ++ VSCode.Uri.toString(resource)
+  | Log.Connection.ProbeFlow.ProbeClassifiedAsAgda(path, version) =>
+    "ProbeClassifiedAsAgda:" ++ path ++ ":" ++ version
+  | Log.Connection.ProbeFlow.ProbeClassifiedAsALS(path, alsVersion, agdaVersion) =>
+    "ProbeClassifiedAsALS:" ++ path ++ ":" ++ alsVersion ++ ":" ++ agdaVersion
+  | Log.Connection.ProbeFlow.ProbeClassifiedAsALSWASM(pathOrUri) =>
+    "ProbeClassifiedAsALSWASM:" ++ pathOrUri
+  | Log.Connection.ProbeFlow.ProbeFailed(pathKey, probeError) =>
+    "ProbeFailed:" ++ pathKey ++ ":" ++ Connection__Error.Probe.toString(probeError)
+  }
+
 let getAgdaTarget = async () => {
   let platformDeps = Desktop.make()
   switch await Connection.fromPathsOrCommands(
@@ -207,12 +240,17 @@ describe("Connection", () => {
     Async.it(
       "should correctly identify Agda executable",
       async () => {
-        let result = await Connection.probeFilepath(agdaMockPath.contents)
+        let (events, onProbeFlow) = observeProbeFlow()
+        let result = await Connection.probeFilepath(agdaMockPath.contents, ~onProbeFlow)
 
         switch result {
         | Ok(path, IsAgda(version)) =>
           Assert.deepStrictEqual(path, agdaMockPath.contents)
           Assert.deepStrictEqual(version, "2.6.4.1")
+          Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+            "ProbeStarted:" ++ resourceFromRawPath(agdaMockPath.contents)->VSCode.Uri.toString,
+            "ProbeClassifiedAsAgda:" ++ probeKeyForLocalPath(agdaMockPath.contents) ++ ":2.6.4.1",
+          ])
         | Ok(_, _) => Assert.fail("Expected Agda result, got ALS")
         | Error(_) => Assert.fail("Expected successful probe of Agda mock")
         }
@@ -222,7 +260,8 @@ describe("Connection", () => {
     Async.it(
       "should correctly identify ALS executable",
       async () => {
-        let result = await Connection.probeFilepath(alsMockPath.contents)
+        let (events, onProbeFlow) = observeProbeFlow()
+        let result = await Connection.probeFilepath(alsMockPath.contents, ~onProbeFlow)
 
         switch result {
         | Ok(path, IsALS(alsVersion, agdaVersion, lspOptions)) =>
@@ -231,6 +270,12 @@ describe("Connection", () => {
           Assert.deepStrictEqual(agdaVersion, "2.6.4")
           // lspOptions should be None for this mock (no prebuilt data directory)
           Assert.deepStrictEqual(lspOptions, None)
+          Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+            "ProbeStarted:" ++ resourceFromRawPath(alsMockPath.contents)->VSCode.Uri.toString,
+            "ProbeClassifiedAsALS:" ++
+            probeKeyForLocalPath(alsMockPath.contents) ++
+            ":1.2.3:2.6.4",
+          ])
         | Ok(_, _) => Assert.fail("Expected ALS result, got Agda")
         | Error(_) => Assert.fail("Expected successful probe of ALS mock")
         }
@@ -257,14 +302,26 @@ describe("Connection", () => {
           tempFile
         }
 
-        let result = await Connection.probeFilepath(mockPath)
+        let (events, onProbeFlow) = observeProbeFlow()
+        let result = await Connection.probeFilepath(mockPath, ~onProbeFlow)
 
         switch result {
-        | Error(Connection__Error.Probe.NotAgdaOrALS(output)) =>
-          // Trim output to handle potential newline characters
-          Assert.deepStrictEqual(String.trim(output), mockOutput)
+        | Error(probeError) =>
+          switch probeError {
+          | Connection__Error.Probe.NotAgdaOrALS(output) =>
+            // Trim output to handle potential newline characters
+            Assert.deepStrictEqual(String.trim(output), mockOutput)
+          | _ => Assert.fail("Expected NotAgdaOrALS error, got different error")
+          }
+
+          Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+            "ProbeStarted:" ++ resourceFromRawPath(mockPath)->VSCode.Uri.toString,
+            "ProbeFailed:" ++
+            probeKeyForLocalPath(mockPath) ++
+            ":" ++
+            Connection__Error.Probe.toString(probeError),
+          ])
         | Ok(_) => Assert.fail("Expected NotAgdaOrALS error")
-        | Error(_) => Assert.fail("Expected NotAgdaOrALS error, got different error")
         }
 
         // Cleanup
@@ -1744,11 +1801,16 @@ describe("Connection", () => {
         // Probe using a file:// URI (as stored in connection.paths for WASM downloads)
         let fileUri = VSCode.Uri.file(wasmPath)
         let uriString = VSCode.Uri.toString(fileUri)
-        let result = await Connection.probeFilepath(uriString)
+        let (events, onProbeFlow) = observeProbeFlow()
+        let result = await Connection.probeFilepath(uriString, ~onProbeFlow)
 
         switch result {
         | Ok((resolvedPath, _probeResult)) =>
           assertLocalPathEqual(resolvedPath, wasmPath)
+          Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+            "ProbeStarted:" ++ fileUri->VSCode.Uri.toString,
+            "ProbeClassifiedAsALSWASM:" ++ resolvedPath,
+          ])
         | Error(_) => Assert.fail("Expected WASM probe to succeed")
         }
 

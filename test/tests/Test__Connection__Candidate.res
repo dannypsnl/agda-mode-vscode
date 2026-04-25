@@ -340,20 +340,87 @@ describe("Connection__Candidate", () => {
   })
 
   describe("resolve", () => {
+    let probeFlowSnapshot = event =>
+      switch event {
+      | Log.Connection.ProbeFlow.CandidateResolveStarted(candidate) =>
+        "CandidateResolveStarted:" ++ Candidate.toString(candidate)
+      | Log.Connection.ProbeFlow.CandidateResolved(original, resource) =>
+        "CandidateResolved:" ++
+        Candidate.toString(original) ++
+        "->" ++
+        VSCode.Uri.toString(resource)
+      | Log.Connection.ProbeFlow.CandidateResolveFailed(original, commandError) =>
+        "CandidateResolveFailed:" ++
+        Candidate.toString(original) ++
+        "->" ++
+        Connection__Command.Error.toString(commandError)
+      | Log.Connection.ProbeFlow.ProbeStarted(_)
+      | Log.Connection.ProbeFlow.ProbeClassifiedAsAgda(_, _)
+      | Log.Connection.ProbeFlow.ProbeClassifiedAsALS(_, _, _)
+      | Log.Connection.ProbeFlow.ProbeClassifiedAsALSWASM(_)
+      | Log.Connection.ProbeFlow.ProbeFailed(_, _) => "UnexpectedProbeFlowVariant"
+      }
+
+    let observeResolveProbeFlow = () => {
+      let events: array<Log.Connection.ProbeFlow.t> = []
+      let onCandidateResolveStarted = candidate =>
+        events->Array.push(Log.Connection.ProbeFlow.CandidateResolveStarted(candidate))
+      let onCandidateResolved = (original, resource) =>
+        events->Array.push(Log.Connection.ProbeFlow.CandidateResolved(original, resource))
+      let onCandidateResolveFailed = (original, commandError) =>
+        events->Array.push(Log.Connection.ProbeFlow.CandidateResolveFailed(original, commandError))
+      (events, onCandidateResolveStarted, onCandidateResolved, onCandidateResolveFailed)
+    }
+
     Async.it("should resolve Command through Platform.findCommand", async () => {
       let findCommand = (command, ~timeout as _timeout=1000) =>
         switch command {
         | "agda" => Promise.resolve(Ok(sampleResolvedPath))
         | _ => Promise.resolve(Error(Connection__Command.Error.NotFound))
         }
+      let candidate = Candidate.make("agda")
+      let (events, onCandidateResolveStarted, onCandidateResolved, onCandidateResolveFailed) =
+        observeResolveProbeFlow()
 
-      switch await Candidate.resolve(findCommand, Candidate.make("agda")) {
+      switch await Candidate.resolve(
+        findCommand,
+        candidate,
+        ~onCandidateResolveStarted,
+        ~onCandidateResolved,
+        ~onCandidateResolveFailed,
+      ) {
       | Ok({original: Command("agda"), resource}) =>
         let expected = VSCode.Uri.file(sampleResolvedPath)->VSCode.Uri.toString
         Assert.deepStrictEqual(resource->VSCode.Uri.toString, expected)
+        Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+          "CandidateResolveStarted:agda",
+          "CandidateResolved:agda->" ++ expected,
+        ])
       | Error(_) => Assert.fail("Expected command resolution to succeed")
       | _ => Assert.fail("Expected resolved command to preserve original candidate")
       }
+    })
+
+    Async.it("should emit CandidateResolveFailed when command candidate cannot be resolved", async () => {
+      let findCommand = (_command, ~timeout as _timeout=1000) =>
+        Promise.resolve(Error(Connection__Command.Error.NotFound))
+      let candidate = Candidate.make("agda")
+      let (events, onCandidateResolveStarted, onCandidateResolved, onCandidateResolveFailed) =
+        observeResolveProbeFlow()
+
+      let result = await Candidate.resolve(
+        findCommand,
+        candidate,
+        ~onCandidateResolveStarted,
+        ~onCandidateResolved,
+        ~onCandidateResolveFailed,
+      )
+
+      Assert.deepStrictEqual(result, Error(Connection__Command.Error.NotFound))
+      Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+        "CandidateResolveStarted:agda",
+        "CandidateResolveFailed:agda->Command not found",
+      ])
     })
 
     Async.it("should leave Resource unchanged when resolving", async () => {

@@ -51,10 +51,14 @@ module type Module = {
     | IsAgda(string) // Agda version
     | IsALS(string, string, option<Connection__Protocol__LSP__Binding.executableOptions>) // ALS version, Agda version, LSP options
     | IsALSWASM(VSCode.Uri.t) // ALS WASM file
-  let probeFilepath: string => promise<result<(string, probeResult), Error.Probe.t>>
+  let probeFilepath: (
+    string,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=?,
+  ) => promise<result<(string, probeResult), Error.Probe.t>>
   let probeCandidate: (
     Platform.t,
     Candidate.t,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=?,
   ) => promise<result<(Candidate.Resolved.t, probeResult), Error.Establish.t>>
 }
 
@@ -162,19 +166,21 @@ module Module: Module = {
     resolved
   }
 
-  let probeResolved = async (resolved: Candidate.Resolved.t) => {
+  let probeResolved = async (
+    resolved: Candidate.Resolved.t,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
+  ) => {
     let {resource} = resolved
+    onProbeFlow(Log.Connection.ProbeFlow.ProbeStarted(resource))
+
     let resourceString = resource->VSCode.Uri.toString
+    let pathKey = resolvedPathForErrors(resolved)
     // Check if it's a WASM file first (assume all WASM files are ALS)
     // Use URI string for .wasm check since fsPath may mangle non-file schemes (e.g. vscode-userdata:)
     if String.endsWith(resourceString, ".wasm") {
       // For file:// scheme (desktop), use fsPath as the path key
       // For other schemes (web), use the URI string to preserve the scheme
-      let pathKey = if VSCode.Uri.scheme(resource) == "file" {
-        VSCode.Uri.fsPath(resource)
-      } else {
-        resourceString
-      }
+      onProbeFlow(Log.Connection.ProbeFlow.ProbeClassifiedAsALSWASM(pathKey))
       Ok(pathKey, IsALSWASM(resource))
     } else {
       // IMPORTANT: Convert URI to platform-specific file system path
@@ -188,11 +194,20 @@ module Module: Module = {
       | Ok(output) =>
         // try Agda
         switch String.match(output, %re("/Agda version (.*)/")) {
-        | Some([_, Some(version)]) => Ok(fsPath, IsAgda(version))
+        | Some([_, Some(version)]) =>
+          onProbeFlow(Log.Connection.ProbeFlow.ProbeClassifiedAsAgda(fsPath, version))
+          Ok(fsPath, IsAgda(version))
         | _ =>
           // try ALS
           switch String.match(output, %re("/Agda v(.*) Language Server v(.*)/")) {
           | Some([_, Some(agdaVersion), Some(alsVersion)]) =>
+            onProbeFlow(
+              Log.Connection.ProbeFlow.ProbeClassifiedAsALS(
+                fsPath,
+                alsVersion,
+                agdaVersion,
+              ),
+            )
             let lspOptions = switch await checkForPrebuiltDataDirectory(fsPath) {
             | Some(assetPath) =>
               let env = Dict.fromArray([("Agda_datadir", assetPath)])
@@ -200,29 +215,46 @@ module Module: Module = {
             | None => None
             }
             Ok(fsPath, IsALS(alsVersion, agdaVersion, lspOptions))
-          | _ => Error(Error.Probe.NotAgdaOrALS(output))
+          | _ =>
+            let error = Error.Probe.NotAgdaOrALS(output)
+            onProbeFlow(Log.Connection.ProbeFlow.ProbeFailed(pathKey, error))
+            Error(error)
           }
         }
-      | Error(error) => Error(Error.Probe.CannotDetermineAgdaOrALS(error))
+      | Error(error) =>
+        let probeError = Error.Probe.CannotDetermineAgdaOrALS(error)
+        onProbeFlow(Log.Connection.ProbeFlow.ProbeFailed(pathKey, probeError))
+        Error(probeError)
       }
     }
   }
 
   // see if it's a Agda executable or a language server
-  let probeFilepath = async path => await probeResolved(resolvedFromRawResource(path))
+  let probeFilepath = async (path, ~onProbeFlow=_ => ()) =>
+    await probeResolved(resolvedFromRawResource(path), ~onProbeFlow)
 
   let probeCandidate = async (
     platformDeps: Platform.t,
     candidate: Candidate.t,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
   ): result<(Candidate.Resolved.t, probeResult), Error.Establish.t> => {
     module PlatformOps = unpack(platformDeps)
-    switch await Candidate.resolve(PlatformOps.findCommand, candidate) {
+    switch await Candidate.resolve(
+      PlatformOps.findCommand,
+      candidate,
+      ~onCandidateResolveStarted=candidate =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolveStarted(candidate)),
+      ~onCandidateResolved=(original, resource) =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolved(original, resource)),
+      ~onCandidateResolveFailed=(original, commandError) =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolveFailed(original, commandError)),
+    ) {
     | Ok(resolved) =>
       let source = switch resolved.original {
       | Candidate.Command(command) => Error.Establish.FromCommandLookup(command)
       | Candidate.Resource(_) => Error.Establish.FromConfig
       }
-      switch await probeResolved(resolved) {
+      switch await probeResolved(resolved, ~onProbeFlow) {
       | Ok(_, probeResult) => Ok((resolved, probeResult))
       | Error(error) =>
         Error(

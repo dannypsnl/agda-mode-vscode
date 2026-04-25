@@ -6,6 +6,7 @@ module SwitchVersionManager = {
   type t = {
     memento: Memento.t,
     globalStorageUri: VSCode.Uri.t,
+    logChannel: Chan.t<Log.t>,
   }
 
   let inferCandidateKind = (raw: string) => {
@@ -65,6 +66,7 @@ module SwitchVersionManager = {
   let make = (state: State.t): t => {
     memento: state.memento,
     globalStorageUri: state.globalStorageUri,
+    logChannel: state.channels.log,
   }
 
   let getItemData = async (
@@ -149,9 +151,11 @@ module SwitchVersionManager = {
       false
     } else {
       module PlatformOps = unpack(platformDeps)
+      let onProbeFlow = event =>
+        self.logChannel->Chan.emit(Log.Connection(Log.Connection.ProbeFlow(event)))
       let probePromises = pathsToProbe->Array.map(async path => {
         let candidate = Candidate.make(path)
-        switch await Core.probeCandidate(platformDeps, candidate) {
+        switch await Core.probeCandidate(platformDeps, candidate, ~onProbeFlow) {
         | Ok((resolved, IsAgda(agdaVersion))) =>
           await Memento.ResolvedMetadata.setKind(
             self.memento,

@@ -172,7 +172,18 @@ let isUnderDirectory = (candidate: t, directory: VSCode.Uri.t): bool =>
 let resolve: (
   (string, ~timeout: int=?) => promise<result<string, Connection__Command.Error.t>>,
   t,
-) => promise<result<Resolved.t, Connection__Command.Error.t>> = async (findCommand, candidate) => {
+  ~onCandidateResolveStarted: t => unit=?,
+  ~onCandidateResolved: (t, VSCode.Uri.t) => unit=?,
+  ~onCandidateResolveFailed: (t, Connection__Command.Error.t) => unit=?,
+) => promise<result<Resolved.t, Connection__Command.Error.t>> = async (
+  findCommand,
+  candidate,
+  ~onCandidateResolveStarted=_ => (),
+  ~onCandidateResolved=(_, _) => (),
+  ~onCandidateResolveFailed=(_, _) => (),
+) => {
+  onCandidateResolveStarted(candidate)
+
   switch candidate {
   | Command(command) =>
     switch await findCommand(command) {
@@ -180,12 +191,16 @@ let resolve: (
       switch Connection__URI.parse(path) {
       | FileURI(_, uri) =>
         let resolved: Resolved.t = {original: candidate, resource: uri}
+        onCandidateResolved(candidate, uri)
         Ok(resolved)
       }
-    | Error(error) => Error(error)
+    | Error(error) =>
+      onCandidateResolveFailed(candidate, error)
+      Error(error)
     }
   | Resource(uri) =>
     let resolved: Resolved.t = {original: candidate, resource: uri}
+    onCandidateResolved(candidate, uri)
     Ok(resolved)
   }
 }

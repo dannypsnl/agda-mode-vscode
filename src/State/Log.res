@@ -66,6 +66,48 @@ module SwitchVersion = {
 }
 
 module Connection = {
+  module ProbeFlow = {
+    type t =
+      | CandidateResolveStarted(Connection__Candidate.t)
+      | CandidateResolved(Connection__Candidate.t, VSCode.Uri.t)
+      | CandidateResolveFailed(Connection__Candidate.t, Connection__Command.Error.t)
+      | ProbeStarted(VSCode.Uri.t)
+      | ProbeClassifiedAsAgda(string, string) // path, agdaVersion
+      | ProbeClassifiedAsALS(string, string, string) // path, alsVersion, agdaVersion
+      | ProbeClassifiedAsALSWASM(string) // pathOrUri
+      | ProbeFailed(string, Connection__Error.Probe.t) // pathKey, error
+
+    let toString = event =>
+      switch event {
+      | CandidateResolveStarted(candidate) =>
+        "CandidateResolveStarted: " ++ Connection__Candidate.toString(candidate)
+      | CandidateResolved(original, resource) =>
+        "CandidateResolved: " ++
+        Connection__Candidate.toString(original) ++
+        " -> " ++
+        VSCode.Uri.toString(resource)
+      | CandidateResolveFailed(original, commandError) =>
+        "CandidateResolveFailed: " ++
+        Connection__Candidate.toString(original) ++
+        " -> " ++
+        Connection__Command.Error.toString(commandError)
+      | ProbeStarted(resource) => "ProbeStarted: " ++ VSCode.Uri.toString(resource)
+      | ProbeClassifiedAsAgda(path, version) =>
+        "ProbeClassifiedAsAgda: " ++ path ++ " (Agda v" ++ version ++ ")"
+      | ProbeClassifiedAsALS(path, alsVersion, agdaVersion) =>
+        "ProbeClassifiedAsALS: " ++
+        path ++
+        " (ALS v" ++
+        alsVersion ++
+        ", Agda v" ++
+        agdaVersion ++
+        ")"
+      | ProbeClassifiedAsALSWASM(pathOrUri) => "ProbeClassifiedAsALSWASM: " ++ pathOrUri
+      | ProbeFailed(pathKey, error) =>
+        "ProbeFailed: " ++ pathKey ++ " -> " ++ Connection__Error.Probe.toString(error)
+      }
+  }
+
   module DownloadFlow = {
     type sourceKind = Managed | GitHub | URL
 
@@ -108,6 +150,7 @@ module Connection = {
   }
 
   type t =
+    | ProbeFlow(ProbeFlow.t) // structured probe / candidate-resolution observability event
     | DownloadFlow(DownloadFlow.t) // structured download flow observability event
     | ConnectedToAgda(string, string) // path, version
     | ConnectedToALS(string, option<(string, string)>) // path, ALS version, Agda version
@@ -115,6 +158,7 @@ module Connection = {
 
   let toString = event =>
     switch event {
+    | ProbeFlow(event) => "[ ProbeFlow        ] " ++ ProbeFlow.toString(event)
     | DownloadFlow(event) => "[ DownloadFlow     ] " ++ DownloadFlow.toString(event)
     | ConnectedToAgda(path, version) => `ConnectedToAgda: ${path} - Agda v${version}`
     | ConnectedToALS(path, Some(alsVersion, agdaVersion)) =>
