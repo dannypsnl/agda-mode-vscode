@@ -33,6 +33,7 @@ module type Module = {
   let fromPathsOrCommands: (
     Platform.t,
     array<(string, Error.Establish.pathSource)>,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=?,
   ) => promise<result<t, Error.Establish.t>>
   let fromDownloads: (Platform.t, Memento.t, VSCode.Uri.t) => promise<result<t, Error.Establish.t>>
 
@@ -274,11 +275,12 @@ module Module: Module = {
     resolved: Candidate.Resolved.t,
     source: Error.Establish.pathSource,
     ~pathForErrors: string=resolvedPathForErrors(resolved),
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
   ): result<
     t,
     Error.Establish.t,
   > => {
-    switch await probeResolved(resolved) {
+    switch await probeResolved(resolved, ~onProbeFlow) {
     | Ok(path, IsAgda(agdaVersion)) =>
       let connection = await Agda.make(path, agdaVersion)
       Ok(Agda(connection, path, agdaVersion))
@@ -416,15 +418,24 @@ module Module: Module = {
     platformDeps: Platform.t,
     candidate: Candidate.t,
     source: Error.Establish.pathSource,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
   ): result<t, Error.Establish.t> => {
     module PlatformOps = unpack(platformDeps)
-    switch await Candidate.resolve(PlatformOps.findCommand, candidate) {
+    switch await Candidate.resolve(
+      PlatformOps.findCommand,
+      candidate,
+      ~onCandidateResolveStarted=c => onProbeFlow(Log.Connection.ProbeFlow.CandidateResolveStarted(c)),
+      ~onCandidateResolved=(original, resource) =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolved(original, resource)),
+      ~onCandidateResolveFailed=(original, commandError) =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolveFailed(original, commandError)),
+    ) {
     | Ok(resolved) =>
       let resolvedSource = switch resolved.original {
       | Candidate.Command(command) => Error.Establish.FromCommandLookup(command)
       | Candidate.Resource(_) => source
       }
-      await makeResolved(resolved, resolvedSource)
+      await makeResolved(resolved, resolvedSource, ~onProbeFlow)
     | Error(commandError) =>
       switch candidate {
       | Candidate.Command(command) => Error(Error.Establish.fromCommandError(command, commandError))
@@ -438,10 +449,11 @@ module Module: Module = {
   let fromPathsOrCommands = async (
     platformDeps: Platform.t,
     entries: array<(string, Error.Establish.pathSource)>,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
   ): result<t, Error.Establish.t> => {
     let tasks = entries->Array.map(((raw, source)) => {
       let candidate = Candidate.make(raw)
-      () => tryCandidate(platformDeps, candidate, source)
+      () => tryCandidate(platformDeps, candidate, source, ~onProbeFlow)
     })
 
     switch await tryUntilSuccess(tasks) {

@@ -278,9 +278,13 @@ let switchAgdaVersion = async (state: State.t, selectedPath: string) => {
     [],
   )
 
+  let onProbeFlow = event =>
+    state.channels.log->Chan.emit(Log.Connection(Log.Connection.ProbeFlow(event)))
+
   switch await Core.fromPathsOrCommands(
     state.platformDeps,
     [(selectedPath, Core.Error.Establish.FromConfig)],
+    ~onProbeFlow,
   ) {
   | Ok(conn) =>
     Util.log("[ debug ] switchAgdaVersion: connection succeeded", Core.toString(conn))
