@@ -911,6 +911,17 @@ describe("Connection UI", () => {
       },
     )
 
+    let observeDownloadFlow = (state: State.t): array<Log.Connection.DownloadFlow.t> => {
+      let events: array<Log.Connection.DownloadFlow.t> = []
+      let _ = state.channels.log->Chan.on(log =>
+        switch log {
+        | Log.Connection(Log.Connection.DownloadFlow(event)) => events->Array.push(event)
+        | _ => ()
+        }
+      )
+      events
+    }
+
     Async.it(
       "handleDownload downloaded=true WASM on desktop should add managed WASM path to config",
       async () =>
@@ -925,13 +936,14 @@ describe("Connection UI", () => {
 
           let platform: Platform.t = module(Mock.Platform.Basic)
           let state = createTestStateWithPlatformAndStorage(platform, globalStorageUri)
+          let versionString = "Agda v2.8.0 Language Server (dev build)"
 
           await Connection__UI__Handlers.handleDownload(
             state,
             platform,
             Connection__Download__DownloadArtifact.Platform.Wasm,
             true,
-            "Agda v2.8.0 Language Server (dev build)",
+            versionString,
             ~channel=Connection__Download__Channel.DevALS,
             ~refreshUI=None,
           )
@@ -1005,16 +1017,15 @@ describe("Connection UI", () => {
             let determinePlatform = async () => Ok(Connection__Download__Platform.MacOS_Arm)
             let askUserAboutDownloadPolicy = async () => Config.Connection.DownloadPolicy.Yes
             let alreadyDownloaded = _globalStorageUri => Promise.resolve(None)
+            let urlSource = Connection__Download__Source.FromURL(
+              Connection__Download__Channel.DevALS,
+              "https://example.invalid/dev-als.wasm",
+              "dev-als",
+            )
             let resolveDownloadChannel = Mock.DownloadDescriptor.mockWith(channel =>
               switch channel {
               | Connection__Download__Channel.DevALS =>
-                Ok(
-                  Connection__Download__Source.FromURL(
-                    Connection__Download__Channel.DevALS,
-                    "https://example.invalid/dev-als.wasm",
-                    "dev-als",
-                  ),
-                )
+                Ok(urlSource)
               | _ => Error(Connection__Download__Error.CannotFindCompatibleALSRelease)
               }
             )
@@ -1040,15 +1051,43 @@ describe("Connection UI", () => {
           ~getDownloadItems=_channel => Promise.resolve([]),
         )
 
+        let events = observeDownloadFlow(state)
+        let requestedVersionString = "ALS vTest"
+        let resolvedSourceVersion = Connection__Download__Source.toVersionString(
+          Connection__Download__Source.FromURL(
+            Connection__Download__Channel.DevALS,
+            "https://example.invalid/dev-als.wasm",
+            "dev-als",
+          ),
+        )
+
         await Connection__UI__Handlers.handleDownload(
           state,
           platform,
           Connection__Download__DownloadArtifact.Platform.Wasm,
           false,
-          "ALS vTest",
+          requestedVersionString,
           ~channel=Connection__Download__Channel.DevALS,
         )
 
+        Assert.deepStrictEqual(events, [
+          Log.Connection.DownloadFlow.SelectionRequested(
+            Connection__Download__Channel.DevALS,
+            Connection__Download__DownloadArtifact.Platform.Wasm,
+            requestedVersionString,
+            false,
+          ),
+          Log.Connection.DownloadFlow.SourceResolved(
+            Log.Connection.DownloadFlow.URL,
+            resolvedSourceVersion,
+          ),
+          Log.Connection.DownloadFlow.DownloadStarted(
+            Connection__Download__Channel.DevALS,
+            Connection__Download__DownloadArtifact.Platform.Wasm,
+            requestedVersionString,
+          ),
+          Log.Connection.DownloadFlow.DownloadSucceeded(downloadedPath),
+        ])
         Assert.deepStrictEqual(downloadedChannel.contents, Some(Connection__Download__Channel.DevALS))
       },
     )
@@ -1102,13 +1141,7 @@ describe("Connection UI", () => {
           let downloadedPath = "/tmp/flow-obs-wasm/als.wasm"
           let platform = Mock.Platform.makeWithSuccessfulDownload(downloadedPath)
           let state = createTestStateWithPlatform(platform)
-          let events: array<Log.Connection.DownloadFlow.t> = []
-          let _ = state.channels.log->Chan.on(log =>
-            switch log {
-            | Log.Connection(Log.Connection.DownloadFlow(e)) => events->Array.push(e)
-            | _ => ()
-            }
-          )
+          let events = observeDownloadFlow(state)
 
           await Connection__UI__Handlers.handleDownload(
             state,
@@ -1157,13 +1190,7 @@ describe("Connection UI", () => {
 
             let platform = Mock.Platform.makeBasic()
             let state = createTestStateWithPlatformAndStorage(platform, storageUri)
-            let events: array<Log.Connection.DownloadFlow.t> = []
-            let _ = state.channels.log->Chan.on(log =>
-              switch log {
-              | Log.Connection(Log.Connection.DownloadFlow(e)) => events->Array.push(e)
-              | _ => ()
-              }
-            )
+            let events = observeDownloadFlow(state)
 
             await Connection__UI__Handlers.handleDownload(
               state,
@@ -1198,13 +1225,7 @@ describe("Connection UI", () => {
           await withTempStorage("flow-managed-miss-", async (_tempDir, storageUri) => {
             let platform = Mock.Platform.makeBasic()
             let state = createTestStateWithPlatformAndStorage(platform, storageUri)
-            let events: array<Log.Connection.DownloadFlow.t> = []
-            let _ = state.channels.log->Chan.on(log =>
-              switch log {
-              | Log.Connection(Log.Connection.DownloadFlow(e)) => events->Array.push(e)
-              | _ => ()
-              }
-            )
+            let events = observeDownloadFlow(state)
 
             await Connection__UI__Handlers.handleDownload(
               state,
@@ -1233,7 +1254,7 @@ describe("Connection UI", () => {
       )
 
       Async.it(
-        "handleDownload downloaded=false should emit SelectionRequested, SourceResolved, DownloadStarted, DownloadFailed on download error",
+        "handleDownload downloaded=false should emit download-requested -> source-resolved -> download-started -> download-failed on download error",
         async () => {
           let cannotFindMsg = Connection__Download__Error.toString(
             Connection__Download__Error.CannotFindCompatibleALSRelease,
@@ -1264,13 +1285,7 @@ describe("Connection UI", () => {
           }
           let platform: Platform.t = module(MockFailPlatform)
           let state = createTestStateWithPlatform(platform)
-          let events: array<Log.Connection.DownloadFlow.t> = []
-          let _ = state.channels.log->Chan.on(log =>
-            switch log {
-            | Log.Connection(Log.Connection.DownloadFlow(e)) => events->Array.push(e)
-            | _ => ()
-            }
-          )
+          let events = observeDownloadFlow(state)
 
           await Connection__UI__Handlers.handleDownload(
             state,
@@ -1282,24 +1297,22 @@ describe("Connection UI", () => {
             ~refreshUI=None,
           )
 
-          Assert.deepStrictEqual(
-            events,
-            [
-              Log.Connection.DownloadFlow.SelectionRequested(
-                Connection__Download__Channel.DevALS,
-                Connection__Download__DownloadArtifact.Platform.Wasm,
-                versionString,
-                false,
-              ),
-              Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.GitHub, versionString),
-              Log.Connection.DownloadFlow.DownloadStarted(
-                Connection__Download__Channel.DevALS,
-                Connection__Download__DownloadArtifact.Platform.Wasm,
-                versionString,
-              ),
-              Log.Connection.DownloadFlow.DownloadFailed(cannotFindMsg),
-            ],
-          )
+          let expectedFlowEvents = [
+            Log.Connection.DownloadFlow.SelectionRequested(
+              Connection__Download__Channel.DevALS,
+              Connection__Download__DownloadArtifact.Platform.Wasm,
+              versionString,
+              false,
+            ),
+            Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.GitHub, versionString),
+            Log.Connection.DownloadFlow.DownloadStarted(
+              Connection__Download__Channel.DevALS,
+              Connection__Download__DownloadArtifact.Platform.Wasm,
+              versionString,
+            ),
+            Log.Connection.DownloadFlow.DownloadFailed(cannotFindMsg),
+          ]
+          Assert.deepStrictEqual(events, expectedFlowEvents)
         },
       )
     })
