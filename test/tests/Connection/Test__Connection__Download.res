@@ -1191,6 +1191,67 @@ describe("Download", () => {
         "als-v6-Agda-2.8.0-macos-arm64.zip",
       )
     })
+
+    Async.it(
+      "sourceForSelection should emit SourceResolved(GitHub) via onEvent callback for matching asset",
+      async () => {
+        let nativeAsset = makeAsset("als-dev-Agda-2.8.0-macos-arm64.zip")
+        let wasmAsset = makeAsset("als-dev-Agda-2.8.0-wasm.wasm")
+        let release = makeRelease("dev", [nativeAsset, wasmAsset])
+        let platform = makePlatform(
+          Connection__Download__Platform.MacOS_Arm,
+          makeGitHubSource(Connection__Download__Channel.DevALS, release, nativeAsset, "dev-als"),
+        )
+
+        let events: array<Log.Connection.DownloadFlow.t> = []
+        let _ = await Connection__Download__Flow.sourceForSelection(
+          Memento.make(None),
+          VSCode.Uri.file("/tmp/agda-flow-onEvent"),
+          platform,
+          ~channel=Connection__Download__Channel.DevALS,
+          ~platform=Connection__Download__DownloadArtifact.Platform.Wasm,
+          ~versionString="Agda v2.8.0 Language Server (dev build)",
+          ~onEvent=event => events->Array.push(event),
+        )
+
+        Assert.deepStrictEqual(
+          events,
+          [Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.GitHub, "Agda v2.8.0 Language Server (dev build)")],
+        )
+      },
+    )
+
+    Async.it(
+      "sourceForSelection should emit FallbackChosen when native not found but WASM exists",
+      async () => {
+        let wasmAsset = makeAsset("als-dev-Agda-2.8.0-wasm.wasm")
+        let nativeAsset = makeAsset("als-dev-Agda-2.8.0-macos-arm64.zip")
+        let release = makeRelease("dev", [nativeAsset, wasmAsset])
+        let platform = makePlatform(
+          Connection__Download__Platform.MacOS_Arm,
+          makeGitHubSource(Connection__Download__Channel.DevALS, release, nativeAsset, "dev-als"),
+        )
+
+        let events: array<Log.Connection.DownloadFlow.t> = []
+        let _ = await Connection__Download__Flow.sourceForSelection(
+          Memento.make(None),
+          VSCode.Uri.file("/tmp/agda-flow-fallback"),
+          platform,
+          ~channel=Connection__Download__Channel.DevALS,
+          ~platform=Connection__Download__DownloadArtifact.Platform.MacOSArm64,
+          ~versionString="Agda v9.9.9 Language Server (dev build)",
+          ~onEvent=event => events->Array.push(event),
+        )
+
+        Assert.deepStrictEqual(
+          events,
+          [
+            Log.Connection.DownloadFlow.FallbackChosen("Agda v2.8.0 Language Server (dev build)"),
+            Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.GitHub, "Agda v2.8.0 Language Server (dev build)"),
+          ],
+        )
+      },
+    )
   })
 
   describe("ManagedStorage.findAnyWasmDownloaded", () => {

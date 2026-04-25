@@ -1092,6 +1092,217 @@ describe("Connection UI", () => {
         Assert.deepStrictEqual(hasSelectOtherChannels, true)
       },
     )
+
+    describe("DownloadFlow observability", () => {
+      let versionString = "Agda v2.8.0 Language Server (dev build)"
+
+      Async.it(
+        "handleDownload downloaded=false should emit SelectionRequested, SourceResolved, DownloadStarted, DownloadSucceeded",
+        async () => {
+          let downloadedPath = "/tmp/flow-obs-wasm/als.wasm"
+          let platform = Mock.Platform.makeWithSuccessfulDownload(downloadedPath)
+          let state = createTestStateWithPlatform(platform)
+          let events: array<Log.Connection.DownloadFlow.t> = []
+          let _ = state.channels.log->Chan.on(log =>
+            switch log {
+            | Log.Connection(Log.Connection.DownloadFlow(e)) => events->Array.push(e)
+            | _ => ()
+            }
+          )
+
+          await Connection__UI__Handlers.handleDownload(
+            state,
+            platform,
+            Connection__Download__DownloadArtifact.Platform.Wasm,
+            false,
+            versionString,
+            ~channel=Connection__Download__Channel.DevALS,
+            ~refreshUI=None,
+          )
+
+          Assert.deepStrictEqual(
+            events,
+            [
+              Log.Connection.DownloadFlow.SelectionRequested(
+                Connection__Download__Channel.DevALS,
+                Connection__Download__DownloadArtifact.Platform.Wasm,
+                versionString,
+                false,
+              ),
+              Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.GitHub, versionString),
+              Log.Connection.DownloadFlow.DownloadStarted(
+                Connection__Download__Channel.DevALS,
+                Connection__Download__DownloadArtifact.Platform.Wasm,
+                versionString,
+              ),
+              Log.Connection.DownloadFlow.DownloadSucceeded(downloadedPath),
+            ],
+          )
+        },
+      )
+
+      Async.it(
+        "handleDownload downloaded=true should emit SelectionRequested, ManagedHit, ReusedExistingArtifact when artifact found",
+        async () => {
+          await withTempStorage("flow-managed-hit-", async (tempDir, storageUri) => {
+            let artifactDir = NodeJs.Path.join([
+              tempDir,
+              "releases",
+              "dev",
+              "als-dev-Agda-2.8.0-wasm",
+            ])
+            let wasmFile = NodeJs.Path.join([artifactDir, "als.wasm"])
+            await NodeJs.Fs.mkdir(artifactDir, {recursive: true, mode: 0o777})
+            NodeJs.Fs.writeFileSync(wasmFile, NodeJs.Buffer.fromString("mock wasm"))
+
+            let platform = Mock.Platform.makeBasic()
+            let state = createTestStateWithPlatformAndStorage(platform, storageUri)
+            let events: array<Log.Connection.DownloadFlow.t> = []
+            let _ = state.channels.log->Chan.on(log =>
+              switch log {
+              | Log.Connection(Log.Connection.DownloadFlow(e)) => events->Array.push(e)
+              | _ => ()
+              }
+            )
+
+            await Connection__UI__Handlers.handleDownload(
+              state,
+              platform,
+              Connection__Download__DownloadArtifact.Platform.Wasm,
+              true,
+              versionString,
+              ~channel=Connection__Download__Channel.DevALS,
+              ~refreshUI=None,
+            )
+
+            Assert.deepStrictEqual(
+              events,
+              [
+                Log.Connection.DownloadFlow.SelectionRequested(
+                  Connection__Download__Channel.DevALS,
+                  Connection__Download__DownloadArtifact.Platform.Wasm,
+                  versionString,
+                  true,
+                ),
+                Log.Connection.DownloadFlow.ManagedHit(versionString, wasmFile),
+                Log.Connection.DownloadFlow.ReusedExistingArtifact(wasmFile),
+              ],
+            )
+          })
+        },
+      )
+
+      Async.it(
+        "handleDownload downloaded=true should emit SelectionRequested, ManagedMiss when artifact not found",
+        async () => {
+          await withTempStorage("flow-managed-miss-", async (_tempDir, storageUri) => {
+            let platform = Mock.Platform.makeBasic()
+            let state = createTestStateWithPlatformAndStorage(platform, storageUri)
+            let events: array<Log.Connection.DownloadFlow.t> = []
+            let _ = state.channels.log->Chan.on(log =>
+              switch log {
+              | Log.Connection(Log.Connection.DownloadFlow(e)) => events->Array.push(e)
+              | _ => ()
+              }
+            )
+
+            await Connection__UI__Handlers.handleDownload(
+              state,
+              platform,
+              Connection__Download__DownloadArtifact.Platform.Wasm,
+              true,
+              versionString,
+              ~channel=Connection__Download__Channel.DevALS,
+              ~refreshUI=None,
+            )
+
+            Assert.deepStrictEqual(
+              events,
+              [
+                Log.Connection.DownloadFlow.SelectionRequested(
+                  Connection__Download__Channel.DevALS,
+                  Connection__Download__DownloadArtifact.Platform.Wasm,
+                  versionString,
+                  true,
+                ),
+                Log.Connection.DownloadFlow.ManagedMiss(versionString),
+              ],
+            )
+          })
+        },
+      )
+
+      Async.it(
+        "handleDownload downloaded=false should emit SelectionRequested, SourceResolved, DownloadStarted, DownloadFailed on download error",
+        async () => {
+          let cannotFindMsg = Connection__Download__Error.toString(
+            Connection__Download__Error.CannotFindCompatibleALSRelease,
+          )
+          module MockFailPlatform = {
+            let determinePlatform = async () => Ok(Connection__Download__Platform.MacOS_Arm)
+            let askUserAboutDownloadPolicy = async () => Config.Connection.DownloadPolicy.Yes
+            let alreadyDownloaded = _globalStorageUri => Promise.resolve(None)
+            let resolveDownloadChannel = Mock.DownloadDescriptor.mockWith(channel =>
+              switch channel {
+              | Connection__Download__Channel.DevALS =>
+                Ok(
+                  Connection__Download__Source.FromGitHub(
+                    channel,
+                    Mock.DownloadDescriptor.mockDevALSDescriptor,
+                  ),
+                )
+              | _ => Error(Connection__Download__Error.CannotFindCompatibleALSRelease)
+              }
+            )
+            let download = (
+              _globalStorageUri,
+              _source,
+              ~trace as _=Connection__Download__Trace.noop,
+            ) => Promise.resolve(Error(Connection__Download__Error.CannotFindCompatibleALSRelease))
+            let findCommand = (_command, ~timeout as _timeout=1000) =>
+              Promise.resolve(Error(Connection__Command.Error.NotFound))
+          }
+          let platform: Platform.t = module(MockFailPlatform)
+          let state = createTestStateWithPlatform(platform)
+          let events: array<Log.Connection.DownloadFlow.t> = []
+          let _ = state.channels.log->Chan.on(log =>
+            switch log {
+            | Log.Connection(Log.Connection.DownloadFlow(e)) => events->Array.push(e)
+            | _ => ()
+            }
+          )
+
+          await Connection__UI__Handlers.handleDownload(
+            state,
+            platform,
+            Connection__Download__DownloadArtifact.Platform.Wasm,
+            false,
+            versionString,
+            ~channel=Connection__Download__Channel.DevALS,
+            ~refreshUI=None,
+          )
+
+          Assert.deepStrictEqual(
+            events,
+            [
+              Log.Connection.DownloadFlow.SelectionRequested(
+                Connection__Download__Channel.DevALS,
+                Connection__Download__DownloadArtifact.Platform.Wasm,
+                versionString,
+                false,
+              ),
+              Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.GitHub, versionString),
+              Log.Connection.DownloadFlow.DownloadStarted(
+                Connection__Download__Channel.DevALS,
+                Connection__Download__DownloadArtifact.Platform.Wasm,
+                versionString,
+              ),
+              Log.Connection.DownloadFlow.DownloadFailed(cannotFindMsg),
+            ],
+          )
+        },
+      )
+    })
   })
 
   describe("Background update", () => {

@@ -5,6 +5,7 @@ let sourceForSelection = async (
   ~channel: Connection__Download__Channel.t,
   ~platform: Connection__Download__DownloadArtifact.Platform.t,
   ~versionString: string,
+  ~onEvent: Log.Connection.DownloadFlow.t => unit=_ => (),
 ): result<Connection__Download__Source.t, Connection__Download__Error.t> => {
   module PlatformOps = unpack(platformDeps)
 
@@ -25,7 +26,14 @@ let sourceForSelection = async (
     let resolver = PlatformOps.resolveDownloadChannel(channel, true)
     switch await resolver(memento, globalStorageUri, downloadPlatform) {
     | Error(error) => Error(error)
-    | Ok(Connection__Download__Source.FromURL(_, _, _) as source) => Ok(source)
+    | Ok(Connection__Download__Source.FromURL(_, _, _) as source) =>
+      onEvent(
+        Log.Connection.DownloadFlow.SourceResolved(
+          Log.Connection.DownloadFlow.URL,
+          Connection__Download__Source.toVersionString(source),
+        ),
+      )
+      Ok(source)
     | Ok(Connection__Download__Source.FromGitHub(_, descriptor)) =>
       let release = descriptor.release
       let assets = switch platform {
@@ -51,8 +59,37 @@ let sourceForSelection = async (
       )
 
       switch matchingSource {
-      | None => Error(Connection__Download__Error.CannotFindCompatibleALSRelease)
-      | Some(source) => Ok(source)
+      | None =>
+        if platform != Connection__Download__DownloadArtifact.Platform.Wasm {
+          switch Connection__Download__Assets.wasm(release)->Array.get(0) {
+          | None => Error(Connection__Download__Error.CannotFindCompatibleALSRelease)
+          | Some(wasmAsset) =>
+            let wasmSource = Connection__Download__Source.FromGitHub(channel, {
+              Connection__Download__GitHub.DownloadDescriptor.asset: wasmAsset,
+              release,
+              saveAsFileName: descriptor.saveAsFileName,
+            })
+            let wasmVersion = Connection__Download__Source.toVersionString(wasmSource)
+            onEvent(Log.Connection.DownloadFlow.FallbackChosen(wasmVersion))
+            onEvent(
+              Log.Connection.DownloadFlow.SourceResolved(
+                Log.Connection.DownloadFlow.GitHub,
+                wasmVersion,
+              ),
+            )
+            Ok(wasmSource)
+          }
+        } else {
+          Error(Connection__Download__Error.CannotFindCompatibleALSRelease)
+        }
+      | Some(source) =>
+        onEvent(
+          Log.Connection.DownloadFlow.SourceResolved(
+            Log.Connection.DownloadFlow.GitHub,
+            Connection__Download__Source.toVersionString(source),
+          ),
+        )
+        Ok(source)
       }
     }
     }

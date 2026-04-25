@@ -66,13 +66,56 @@ module SwitchVersion = {
 }
 
 module Connection = {
+  module DownloadFlow = {
+    type sourceKind = Managed | GitHub | URL
+
+    type t =
+      | SelectionRequested(
+          Connection__Download__Channel.t,
+          Connection__Download__DownloadArtifact.Platform.t,
+          string,
+          bool,
+        ) // channel, platform, versionString, alreadyDownloaded
+      | ManagedHit(string, string) // versionString, path
+      | ManagedMiss(string) // versionString
+      | SourceResolved(sourceKind, string) // sourceKind, versionString
+      | ReusedExistingArtifact(string) // path
+      | DownloadStarted(
+          Connection__Download__Channel.t,
+          Connection__Download__DownloadArtifact.Platform.t,
+          string,
+        ) // channel, platform, versionString
+      | DownloadSucceeded(string) // path
+      | DownloadFailed(string) // errorMsg
+      | FallbackChosen(string) // versionString
+
+    let toString = event =>
+      switch event {
+      | SelectionRequested(channel, platform, vs, downloaded) =>
+        `SelectionRequested: channel=${Connection__Download__Channel.toString(channel)} platform=${Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)} version=${vs} downloaded=${string_of_bool(downloaded)}`
+      | ManagedHit(vs, path) => `ManagedHit: ${vs} at ${path}`
+      | ManagedMiss(vs) => `ManagedMiss: ${vs}`
+      | SourceResolved(Managed, vs) => `SourceResolved(Managed): ${vs}`
+      | SourceResolved(GitHub, vs) => `SourceResolved(GitHub): ${vs}`
+      | SourceResolved(URL, vs) => `SourceResolved(URL): ${vs}`
+      | ReusedExistingArtifact(path) => `ReusedExistingArtifact: ${path}`
+      | DownloadStarted(channel, platform, vs) =>
+        `DownloadStarted: channel=${Connection__Download__Channel.toString(channel)} platform=${Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)} version=${vs}`
+      | DownloadSucceeded(path) => `DownloadSucceeded: ${path}`
+      | DownloadFailed(msg) => `DownloadFailed: ${msg}`
+      | FallbackChosen(vs) => `FallbackChosen: ${vs}`
+      }
+  }
+
   type t =
+    | DownloadFlow(DownloadFlow.t) // structured download flow observability event
     | ConnectedToAgda(string, string) // path, version
     | ConnectedToALS(string, option<(string, string)>) // path, ALS version, Agda version
     | Disconnected(string) // path
 
   let toString = event =>
     switch event {
+    | DownloadFlow(event) => "[ DownloadFlow     ] " ++ DownloadFlow.toString(event)
     | ConnectedToAgda(path, version) => `ConnectedToAgda: ${path} - Agda v${version}`
     | ConnectedToALS(path, Some(alsVersion, agdaVersion)) =>
       `ConnectedToALS: ${path} - Agda v${agdaVersion} Language Server v${alsVersion}`
