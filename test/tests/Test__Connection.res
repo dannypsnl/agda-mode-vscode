@@ -122,6 +122,21 @@ let establishFlowSnapshot = event =>
   | Log.Connection.EstablishFlow.ConnectionEstablishFailed => "ConnectionEstablishFailed"
   }
 
+let collectEstablishFlow = (listener: (~filter: Log.t => bool=?) => array<Log.t>) =>
+  listener(~filter=log =>
+    switch log {
+    | Log.Connection(Log.Connection.EstablishFlow(_)) => true
+    | _ => false
+    }
+  )
+  ->Array.filterMap(log =>
+    switch log {
+    | Log.Connection(Log.Connection.EstablishFlow(event)) => Some(event)
+    | _ => None
+    }
+  )
+  ->Array.map(establishFlowSnapshot)
+
 let getAgdaTarget = async () => {
   let platformDeps = Desktop.make()
   switch await Connection.fromPathsOrCommands(
@@ -1180,9 +1195,23 @@ describe("Connection", () => {
         let logChannel = Chan.make()
         let listener = Log.collect(logChannel)
 
-        // Create minimal memento and platformDeps (using mock to avoid dialogs)
+        // Create minimal memento and platformDeps with deterministic fallback failure
         let memento = Memento.make(None)
-        let platformDeps = Mock.Platform.makeBasic()
+        let platformDeps: Platform.t = {
+          module MockPlatform = {
+            let determinePlatform = async () => Ok(Connection__Download__Platform.MacOS_Arm)
+            let askUserAboutDownloadPolicy = async () => Config.Connection.DownloadPolicy.Yes
+            let alreadyDownloaded = _ => Promise.resolve(None)
+            let resolveDownloadChannel = (_channel, _allowFallback) =>
+              async (_memento, _globalStorageUri, _platform) =>
+                Error(Connection__Download__Error.CannotFindCompatibleALSRelease)
+            let download = (_globalStorageUri, _source, ~trace as _=Connection__Download__Trace.noop) =>
+              Promise.resolve(Error(Connection__Download__Error.CannotFindCompatibleALSRelease))
+            let findCommand = (_command, ~timeout as _timeout=1000) =>
+              Promise.resolve(Error(Connection__Command.Error.NotFound))
+          }
+          module(MockPlatform)
+        }
         let globalStorageUri = VSCode.Uri.file("/tmp/test-storage")
 
         // INVOKE: Connection.makeWithFallback with invalid paths and commands
@@ -1196,6 +1225,17 @@ describe("Connection", () => {
         ) {
         | Ok(_) => Assert.fail("Expected connection to fail")
         | Error(_) =>
+          let establishFlowEvents = collectEstablishFlow(listener)
+
+          Assert.deepStrictEqual(establishFlowEvents, [
+            "ConfigCandidatesStarted:1",
+            "CandidateAttempted:/nonexistent/path:from config",
+            "ConfigCandidatesFailed",
+            "DownloadFallbackStarted:dev:macos-arm64",
+            "DownloadFallbackFailed",
+            "ConnectionEstablishFailed",
+          ])
+
           let loggedEvents = listener(~filter=Log.isConnection)
           // VERIFY: No ConnectedTo* lifecycle events were logged
           Assert.deepStrictEqual(loggedEvents, [])
@@ -1291,10 +1331,16 @@ describe("Connection", () => {
           ["invalid-command"], // invalid commands
           logChannel,
         )
+        let establishFlowEvents = collectEstablishFlow(listener)
         let loggedEvents = listener(~filter=Log.isConnection)
 
         switch result {
         | Ok(connection) =>
+          Assert.deepStrictEqual(establishFlowEvents, [
+            "ConfigCandidatesStarted:1",
+            "CandidateAttempted:" ++ agdaMockPath ++ ":from config",
+            "ConnectionEstablished:" ++ agdaMockPath ++ ":Agda",
+          ])
           // Should have logged connection to the mock path
           Assert.deepStrictEqual(
             loggedEvents,
@@ -1605,20 +1651,7 @@ describe("Connection", () => {
 
         switch result {
         | Ok(connection) =>
-          let establishFlowEvents =
-            listener(~filter=log =>
-              switch log {
-              | Log.Connection(Log.Connection.EstablishFlow(_)) => true
-              | _ => false
-              }
-            )
-            ->Array.filterMap(log =>
-              switch log {
-              | Log.Connection(Log.Connection.EstablishFlow(event)) => Some(event)
-              | _ => None
-              }
-            )
-            ->Array.map(establishFlowSnapshot)
+          let establishFlowEvents = collectEstablishFlow(listener)
 
           Assert.deepStrictEqual(establishFlowEvents, [
             "ConfigCandidatesStarted:1",

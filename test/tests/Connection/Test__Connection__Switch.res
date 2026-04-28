@@ -1269,6 +1269,18 @@ describe("Connection__Switch", () => {
         events
       }
 
+      let observeEstablishFlow = (state: State.t) => {
+        let events: ref<array<Log.Connection.EstablishFlow.t>> = ref([])
+        let _ = state.channels.log->Chan.on(logEvent =>
+          switch logEvent {
+          | Log.Connection(Log.Connection.EstablishFlow(event)) =>
+            events.contents = Array.concat(events.contents, [event])
+          | _ => ()
+          }
+        )
+        events
+      }
+
       Async.it(
         "should keep existing shared connection when switch target cannot be established",
         async () => {
@@ -1289,6 +1301,7 @@ describe("Connection__Switch", () => {
           let missingPathKey = VSCode.Uri.fsPath(missingUri)
           let missingUriString = VSCode.Uri.toString(missingUri)
           let probeFlowEvents = observeProbeFlow(state)
+          let establishFlowEvents = observeEstablishFlow(state)
 
           let completion =
             Connection.switchCandidate(state, missingPath)->Promise.thenResolve(_ => "done")
@@ -1309,6 +1322,20 @@ describe("Connection__Switch", () => {
               ("Unexpected", Log.Connection.ProbeFlow.toString(unexpected), "", "")
             }
           )
+          let observedEstablishFlow = establishFlowEvents.contents->Array.map(event =>
+            switch event {
+            | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
+              (
+                "CandidateAttempted",
+                pathOrCommand,
+                Connection.Error.Establish.pathSourceToString(source),
+              )
+            | Log.Connection.EstablishFlow.ConnectionEstablishFailed =>
+              ("ConnectionEstablishFailed", "", "")
+            | unexpected =>
+              ("Unexpected", Log.Connection.EstablishFlow.toString(unexpected), "")
+            }
+          )
 
           switch winner {
           | "done" =>
@@ -1317,6 +1344,10 @@ describe("Connection__Switch", () => {
               ("CandidateResolved", missingUriString, missingUriString, ""),
               ("ProbeStarted", missingUriString, "", ""),
               ("ProbeFailed", missingPathKey, "", ""),
+            ])
+            Assert.deepStrictEqual(observedEstablishFlow, [
+              ("CandidateAttempted", missingPath, "from config"),
+              ("ConnectionEstablishFailed", "", ""),
             ])
             switch Registry__Connection.status.contents {
             | Active(resource) =>
@@ -1346,6 +1377,7 @@ describe("Connection__Switch", () => {
           let mockAgdaUriString = VSCode.Uri.toString(mockAgdaUri)
           let mockAgdaFsPath = VSCode.Uri.fsPath(mockAgdaUri)
           let probeFlowEvents = observeProbeFlow(state)
+          let establishFlowEvents = observeEstablishFlow(state)
 
           await Connection.switchCandidate(state, "agda")
 
@@ -1363,12 +1395,40 @@ describe("Connection__Switch", () => {
               ("Unexpected", Log.Connection.ProbeFlow.toString(unexpected), "", "")
             }
           )
+          let observedEstablishFlow = establishFlowEvents.contents->Array.map(event =>
+            switch event {
+            | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
+              (
+                "CandidateAttempted",
+                pathOrCommand,
+                Connection.Error.Establish.pathSourceToString(source),
+                "",
+              )
+            | Log.Connection.EstablishFlow.ConnectionEstablished(path, kind) =>
+              (
+                "ConnectionEstablished",
+                path,
+                switch kind {
+                | Log.Connection.EstablishFlow.Agda => "Agda"
+                | Log.Connection.EstablishFlow.ALS => "ALS"
+                | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
+                },
+                "",
+              )
+            | unexpected =>
+              ("Unexpected", Log.Connection.EstablishFlow.toString(unexpected), "", "")
+            }
+          )
 
           Assert.deepStrictEqual(observedProbeFlow, [
             ("CandidateResolveStarted", "agda", "", ""),
             ("CandidateResolved", "agda", mockAgdaUriString, ""),
             ("ProbeStarted", mockAgdaUriString, "", ""),
             ("ProbeClassifiedAsAgda", mockAgdaFsPath, "2.7.0.1", ""),
+          ])
+          Assert.deepStrictEqual(observedEstablishFlow, [
+            ("CandidateAttempted", "agda", "from config", ""),
+            ("ConnectionEstablished", mockAgdaFsPath, "Agda", ""),
           ])
 
           module PlatformOps = unpack(platform)
