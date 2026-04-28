@@ -714,6 +714,8 @@ module Module: Module = {
     let preferredCandidate = Memento.PreferredCandidate.get(memento)
     let onEstablishFlow = event =>
       logChannel->Chan.emit(Log.Connection(Log.Connection.EstablishFlow(event)))
+    let onProbeFlow = event =>
+      logChannel->Chan.emit(Log.Connection(Log.Connection.ProbeFlow(event)))
 
     // Step 0: preferred candidate, if present.
     let preferredEntries = switch preferredCandidate {
@@ -735,7 +737,7 @@ module Module: Module = {
 
     // Try step 0 (preferred candidate) -> step 1 (config paths) -> download fallback.
     // Command probes are not part of the resolution chain.
-    switch await fromPathsOrCommands(platformDeps, preferredEntries, ~onEstablishFlow) {
+    switch await fromPathsOrCommands(platformDeps, preferredEntries, ~onEstablishFlow, ~onProbeFlow) {
     | Ok(connection) =>
       logConnection(connection)
       Ok(connection)
@@ -744,6 +746,7 @@ module Module: Module = {
         platformDeps,
         pathsWithSource,
         ~onEstablishFlow,
+        ~onProbeFlow,
       ) {
       | Ok(connection) =>
         logConnection(connection)

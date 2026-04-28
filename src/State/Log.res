@@ -66,6 +66,38 @@ module SwitchVersion = {
 }
 
 module Connection = {
+  module ActivationFlow = {
+    type t =
+      | ActivationStarted
+      | ExistingConnectionReused
+      | FreshEstablishStarted
+      | ActivationSucceeded
+      | ActivationFailed
+
+    let toString = event =>
+      switch event {
+      | ActivationStarted => "ActivationStarted"
+      | ExistingConnectionReused => "ExistingConnectionReused"
+      | FreshEstablishStarted => "FreshEstablishStarted"
+      | ActivationSucceeded => "ActivationSucceeded"
+      | ActivationFailed => "ActivationFailed"
+      }
+  }
+
+  module SwitchUIFlow = {
+    type t =
+      | SwitchRequested(string) // selectedPath
+      | SwitchSucceeded(string) // finalPath
+      | SwitchFailed(string) // selectedPath
+
+    let toString = event =>
+      switch event {
+      | SwitchRequested(selectedPath) => "SwitchRequested: " ++ selectedPath
+      | SwitchSucceeded(finalPath) => "SwitchSucceeded: " ++ finalPath
+      | SwitchFailed(selectedPath) => "SwitchFailed: " ++ selectedPath
+      }
+  }
+
   module EstablishFlow = {
     type connectionKind = Agda | ALS | ALSWASM
 
@@ -189,6 +221,8 @@ module Connection = {
   }
 
   type t =
+    | ActivationFlow(ActivationFlow.t) // top-level activation/acquisition flow
+    | SwitchUIFlow(SwitchUIFlow.t) // top-level switch-ui intent/result flow
     | EstablishFlow(EstablishFlow.t) // top-level connection-establishment flow
     | ProbeFlow(ProbeFlow.t) // structured probe / candidate-resolution observability event
     | DownloadFlow(DownloadFlow.t) // structured download flow observability event
@@ -198,6 +232,8 @@ module Connection = {
 
   let toString = event =>
     switch event {
+    | ActivationFlow(event) => "[ ActivationFlow   ] " ++ ActivationFlow.toString(event)
+    | SwitchUIFlow(event) => "[ SwitchUIFlow    ] " ++ SwitchUIFlow.toString(event)
     | EstablishFlow(event) => "[ EstablishFlow    ] " ++ EstablishFlow.toString(event)
     | ProbeFlow(event) => "[ ProbeFlow        ] " ++ ProbeFlow.toString(event)
     | DownloadFlow(event) => "[ DownloadFlow     ] " ++ DownloadFlow.toString(event)

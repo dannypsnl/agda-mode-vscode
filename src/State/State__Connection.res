@@ -36,7 +36,11 @@ let sendRequest = async (
     }
   }
 
-  let make = () =>
+  state.channels.log->Chan.emit(Log.Connection(Log.Connection.ActivationFlow(ActivationStarted)))
+  let freshEstablishStarted = ref(false)
+  let make = () => {
+    freshEstablishStarted := true
+    state.channels.log->Chan.emit(Log.Connection(Log.Connection.ActivationFlow(FreshEstablishStarted)))
     Connection.makeWithFallback(
       state.platformDeps,
       state.memento,
@@ -45,10 +49,18 @@ let sendRequest = async (
       ["als", "agda"],
       state.channels.log,
     )
+  }
 
   switch await Registry__Connection.acquire(state.id, make) {
-  | Error(error) => await State__View.Panel.displayConnectionError(state, error)
-  | Ok(connection) => await sendRequestAndHandleResponses(connection, state, request, handleResponse)
+  | Error(error) =>
+    state.channels.log->Chan.emit(Log.Connection(Log.Connection.ActivationFlow(ActivationFailed)))
+    await State__View.Panel.displayConnectionError(state, error)
+  | Ok(connection) =>
+    if !freshEstablishStarted.contents {
+      state.channels.log->Chan.emit(Log.Connection(Log.Connection.ActivationFlow(ExistingConnectionReused)))
+    }
+    state.channels.log->Chan.emit(Log.Connection(Log.Connection.ActivationFlow(ActivationSucceeded)))
+    await sendRequestAndHandleResponses(connection, state, request, handleResponse)
   }
 }
 

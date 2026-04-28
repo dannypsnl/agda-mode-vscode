@@ -99,49 +99,73 @@ describe("Connection UI", () => {
     Async.it(
       "candidate rows should route selection through the candidate seam",
       async () => {
-        let state = createTestState()
-        let view = Connection__UI__Picker.make(state.channels.log)
-        let selectedChannel = ref(Connection__Download__Channel.DevALS)
-        let switchCalled = ref(None)
-        let sawDestroyed = ref(false)
-        let sawSelectionCompleted = ref(false)
-        let entry: Memento.ResolvedMetadata.entry = {
-          kind: Memento.ResolvedMetadata.Agda(Some("2.7.0.1")),
-          timestamp: Date.make(),
-          error: None,
-        }
-        let _ = state.channels.log->Chan.on(logEvent =>
-          switch logEvent {
-          | Log.SwitchVersionUI(Log.SwitchVersion.Destroyed) => sawDestroyed := true
-          | Log.SwitchVersionUI(Log.SwitchVersion.SelectionCompleted) =>
-            sawSelectionCompleted := true
-          | _ => ()
+        let mockAgda =
+          await Test__Util.Candidate.Agda.mock(~version="2.7.0.1", ~name="agda-ui-switch-flow")
+        try {
+          let state = createTestState()
+          let view = Connection__UI__Picker.make(state.channels.log)
+          let selectedChannel = ref(Connection__Download__Channel.DevALS)
+          let sawDestroyed = ref(false)
+          let sawSelectionCompleted = ref(false)
+          let switchUIFlowEvents: array<Log.Connection.SwitchUIFlow.t> = []
+          let entry: Memento.ResolvedMetadata.entry = {
+            kind: Memento.ResolvedMetadata.Agda(Some("2.7.0.1")),
+            timestamp: Date.make(),
+            error: None,
           }
-        )
+          let _ = state.channels.log->Chan.on(logEvent =>
+            switch logEvent {
+            | Log.SwitchVersionUI(Log.SwitchVersion.Destroyed) => sawDestroyed := true
+            | Log.SwitchVersionUI(Log.SwitchVersion.SelectionCompleted) =>
+              sawSelectionCompleted := true
+            | Log.Connection(Log.Connection.SwitchUIFlow(event)) =>
+              switchUIFlowEvents->Array.push(event)
+            | _ => ()
+            }
+          )
 
-        let selectedItem =
-          makePickerItem(state, Candidate("/tmp/agda", "/tmp/agda", entry, false))
+          let onSelectionCompleted = Log.on(
+            state.channels.log,
+            log =>
+              switch log {
+              | Log.SwitchVersionUI(SelectionCompleted) => true
+              | _ => false
+              },
+          )
 
-        Connection__UI__Handlers.onSelection(
-          state,
-          makeMockPlatform(),
-          selectedChannel,
-          _downloadItems => Promise.resolve(),
-          view,
-          [selectedItem],
-          ~hasSelectionChanged=_ => true,
-          ~switchCandidate=path => {
-            switchCalled := Some(path)
-            Promise.resolve()
-          },
-          ~getDownloadItems=_channel => Promise.resolve([]),
-        )
+          let selectedItem =
+            makePickerItem(state, Candidate(mockAgda, mockAgda, entry, false))
 
-        await Test__Util.wait(200)
+          Connection__UI__Handlers.onSelection(
+            state,
+            makeMockPlatform(),
+            selectedChannel,
+            _downloadItems => Promise.resolve(),
+            view,
+            [selectedItem],
+            ~hasSelectionChanged=_ => true,
+            ~switchCandidate=path => Connection.switchCandidate(state, path),
+            ~getDownloadItems=_channel => Promise.resolve([]),
+          )
 
-        Assert.deepStrictEqual(switchCalled.contents, Some("/tmp/agda"))
-        Assert.deepStrictEqual(sawDestroyed.contents, true)
-        Assert.deepStrictEqual(sawSelectionCompleted.contents, true)
+          await onSelectionCompleted
+
+          Assert.deepStrictEqual(
+            switchUIFlowEvents,
+            [
+              Log.Connection.SwitchUIFlow.SwitchRequested(mockAgda),
+              Log.Connection.SwitchUIFlow.SwitchSucceeded(mockAgda),
+            ],
+          )
+          Assert.deepStrictEqual(Memento.PreferredCandidate.get(state.memento), Some(mockAgda))
+          Assert.deepStrictEqual(sawDestroyed.contents, true)
+          Assert.deepStrictEqual(sawSelectionCompleted.contents, true)
+        } catch {
+        | exn =>
+          await Test__Util.Candidate.Agda.destroy(mockAgda)
+          raise(exn)
+        }
+        await Test__Util.Candidate.Agda.destroy(mockAgda)
       },
     )
 
