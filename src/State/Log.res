@@ -66,6 +66,45 @@ module SwitchVersion = {
 }
 
 module Connection = {
+  module EstablishFlow = {
+    type connectionKind = Agda | ALS | ALSWASM
+
+    type t =
+      | ConfigCandidatesStarted(int)
+      | CandidateAttempted(string, Connection__Error.Establish.pathSource)
+      | ConfigCandidatesFailed
+      | DownloadFallbackStarted(
+          Connection__Download__Channel.t,
+          Connection__Download__DownloadArtifact.Platform.t,
+        )
+      | DownloadFallbackFailed(Connection__Error.Establish.t)
+      | ConnectionEstablished(string, connectionKind)
+      | ConnectionEstablishFailed
+
+    let toString = event =>
+      switch event {
+      | ConfigCandidatesStarted(count) => "ConfigCandidatesStarted: " ++ string_of_int(count)
+      | CandidateAttempted(pathOrCommand, source) =>
+        "CandidateAttempted: " ++
+        pathOrCommand ++
+        " (" ++
+        Connection__Error.Establish.pathSourceToString(source) ++
+        ")"
+      | ConfigCandidatesFailed => "ConfigCandidatesFailed"
+      | DownloadFallbackStarted(channel, platform) =>
+        "DownloadFallbackStarted: channel=" ++
+        Connection__Download__Channel.toString(channel) ++
+        " platform=" ++
+        Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)
+      | DownloadFallbackFailed(error) =>
+        "DownloadFallbackFailed: " ++ Connection__Error.Establish.toString(error)
+      | ConnectionEstablished(path, Agda) => "ConnectionEstablished: " ++ path ++ " (Agda)"
+      | ConnectionEstablished(path, ALS) => "ConnectionEstablished: " ++ path ++ " (ALS)"
+      | ConnectionEstablished(path, ALSWASM) => "ConnectionEstablished: " ++ path ++ " (ALSWASM)"
+      | ConnectionEstablishFailed => "ConnectionEstablishFailed"
+      }
+  }
+
   module ProbeFlow = {
     type t =
       | CandidateResolveStarted(Connection__Candidate.t)
@@ -150,6 +189,7 @@ module Connection = {
   }
 
   type t =
+    | EstablishFlow(EstablishFlow.t) // top-level connection-establishment flow
     | ProbeFlow(ProbeFlow.t) // structured probe / candidate-resolution observability event
     | DownloadFlow(DownloadFlow.t) // structured download flow observability event
     | ConnectedToAgda(string, string) // path, version
@@ -158,6 +198,7 @@ module Connection = {
 
   let toString = event =>
     switch event {
+    | EstablishFlow(event) => "[ EstablishFlow    ] " ++ EstablishFlow.toString(event)
     | ProbeFlow(event) => "[ ProbeFlow        ] " ++ ProbeFlow.toString(event)
     | DownloadFlow(event) => "[ DownloadFlow     ] " ++ DownloadFlow.toString(event)
     | ConnectedToAgda(path, version) => `ConnectedToAgda: ${path} - Agda v${version}`
@@ -233,7 +274,9 @@ let isConfig = log =>
 
 let isConnection = log =>
   switch log {
-  | Connection(_) => true
+  | Connection(Connection.ConnectedToAgda(_, _))
+  | Connection(Connection.ConnectedToALS(_, _))
+  | Connection(Connection.Disconnected(_)) => true
   | _ => false
   }
 

@@ -34,8 +34,14 @@ module type Module = {
     Platform.t,
     array<(string, Error.Establish.pathSource)>,
     ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=?,
+    ~onEstablishFlow: Log.Connection.EstablishFlow.t => unit=?,
   ) => promise<result<t, Error.Establish.t>>
-  let fromDownloads: (Platform.t, Memento.t, VSCode.Uri.t) => promise<result<t, Error.Establish.t>>
+  let fromDownloads: (
+    Platform.t,
+    Memento.t,
+    VSCode.Uri.t,
+    ~onEstablishFlow: Log.Connection.EstablishFlow.t => unit=?,
+  ) => promise<result<t, Error.Establish.t>>
 
   // messaging
   let sendRequest: (
@@ -450,10 +456,14 @@ module Module: Module = {
     platformDeps: Platform.t,
     entries: array<(string, Error.Establish.pathSource)>,
     ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
+    ~onEstablishFlow: Log.Connection.EstablishFlow.t => unit=_ => (),
   ): result<t, Error.Establish.t> => {
     let tasks = entries->Array.map(((raw, source)) => {
       let candidate = Candidate.make(raw)
-      () => tryCandidate(platformDeps, candidate, source, ~onProbeFlow)
+      () => {
+        onEstablishFlow(Log.Connection.EstablishFlow.CandidateAttempted(raw, source))
+        tryCandidate(platformDeps, candidate, source, ~onProbeFlow)
+      }
     })
 
     switch await tryUntilSuccess(tasks) {
@@ -472,11 +482,16 @@ module Module: Module = {
     platformDeps: Platform.t,
     memento: Memento.t,
     globalStorageUri: VSCode.Uri.t,
+    ~onEstablishFlow: Log.Connection.EstablishFlow.t => unit=_ => (),
   ): result<t, Error.Establish.t> => {
     module PlatformOps = unpack(platformDeps)
+    let failDownloadFallback = (error: Error.Establish.t) => {
+      onEstablishFlow(Log.Connection.EstablishFlow.DownloadFallbackFailed(error))
+      Error(error)
+    }
 
     switch await PlatformOps.determinePlatform() {
-    | Error(platform) => Error(Error.Establish.fromDownloadError(PlatformNotSupported(platform)))
+    | Error(platform) => failDownloadFallback(Error.Establish.fromDownloadError(PlatformNotSupported(platform)))
     | Ok(platform) =>
       // On web, always download (no alternatives exist)
       // On desktop, respect user's config
@@ -496,11 +511,15 @@ module Module: Module = {
       | Config.Connection.DownloadPolicy.Undecided =>
         // User cancelled, treat as No
         await Config.Connection.DownloadPolicy.set(No)
-        Error(Error.Establish.fromDownloadError(Connection__Download__Error.OptedNotToDownload))
+        failDownloadFallback(
+          Error.Establish.fromDownloadError(Connection__Download__Error.OptedNotToDownload),
+        )
       | No =>
         // User opted not to download, set policy and return error
         await Config.Connection.DownloadPolicy.set(No)
-        Error(Error.Establish.fromDownloadError(Connection__Download__Error.OptedNotToDownload))
+        failDownloadFallback(
+          Error.Establish.fromDownloadError(Connection__Download__Error.OptedNotToDownload),
+        )
       | Yes =>
         await Config.Connection.DownloadPolicy.set(Yes)
         // Use the selected channel from memento, defaulting to DevALS.
@@ -516,6 +535,12 @@ module Module: Module = {
           | None => Connection__Download__Channel.DevALS
           }
         }
+        onEstablishFlow(
+          Log.Connection.EstablishFlow.DownloadFallbackStarted(
+            channel,
+            Connection__Download__DownloadArtifact.Platform.fromDownloadPlatform(platform),
+          ),
+        )
         // Fresh GitHub downloads can fall back to a WASM asset from the same resolved release.
         // Cached managed downloads use their managed path metadata instead of the selected channel.
         let wasmFallbackSource: ref<option<Connection__Download__Source.t>> = ref(None)
@@ -623,19 +648,21 @@ module Module: Module = {
                 switch await make(wasmPath, source) {
                 | Ok(connection) => Ok(connection)
                 | Error(wasmError) =>
-                  Error(Error.Establish.merge(
-                    {...nativeError, download: Succeeded},
-                    {...wasmError, download: Succeeded},
-                  ))
+                  failDownloadFallback(
+                    Error.Establish.merge(
+                      {...nativeError, download: Succeeded},
+                      {...wasmError, download: Succeeded},
+                    ),
+                  )
                 }
               | Error(_) =>
-                Error({...nativeError, download: Succeeded})
+                failDownloadFallback({...nativeError, download: Succeeded})
               }
             } else {
-              Error({...nativeError, download: Succeeded})
+              failDownloadFallback({...nativeError, download: Succeeded})
             }
           }
-        | Error(error) => Error(error)
+        | Error(error) => failDownloadFallback(error)
         }
       }
     }
@@ -658,6 +685,18 @@ module Module: Module = {
     logChannel: Chan.t<Log.t>,
   ): result<t, Error.t> => {
     let logConnection = connection => {
+      let establishKind = switch connection {
+      | Agda(_, _, _) => Log.Connection.EstablishFlow.Agda
+      | ALS(_, _, _) => Log.Connection.EstablishFlow.ALS
+      | ALSWASM(_, _, _, _) => Log.Connection.EstablishFlow.ALSWASM
+      }
+      logChannel->Chan.emit(
+        Log.Connection(
+          Log.Connection.EstablishFlow(
+            Log.Connection.EstablishFlow.ConnectionEstablished(getPath(connection), establishKind),
+          ),
+        ),
+      )
       switch connection {
       | Agda(_, path, version) =>
         logChannel->Chan.emit(Log.Connection(ConnectedToAgda(path, version)))
@@ -673,6 +712,8 @@ module Module: Module = {
     }
 
     let preferredCandidate = Memento.PreferredCandidate.get(memento)
+    let onEstablishFlow = event =>
+      logChannel->Chan.emit(Log.Connection(Log.Connection.EstablishFlow(event)))
 
     // Step 0: preferred candidate, if present.
     let preferredEntries = switch preferredCandidate {
@@ -689,21 +730,33 @@ module Module: Module = {
       remainingPaths
       ->Array.toReversed
       ->Array.map(path => (path, Error.Establish.FromConfig))
+    let configCandidateCount = Array.length(preferredEntries) + Array.length(pathsWithSource)
+    onEstablishFlow(Log.Connection.EstablishFlow.ConfigCandidatesStarted(configCandidateCount))
 
     // Try step 0 (preferred candidate) -> step 1 (config paths) -> download fallback.
     // Command probes are not part of the resolution chain.
-    switch await fromPathsOrCommands(platformDeps, preferredEntries) {
+    switch await fromPathsOrCommands(platformDeps, preferredEntries, ~onEstablishFlow) {
     | Ok(connection) =>
       logConnection(connection)
       Ok(connection)
     | Error(step0Error) =>
-      switch await fromPathsOrCommands(platformDeps, pathsWithSource) {
+      switch await fromPathsOrCommands(
+        platformDeps,
+        pathsWithSource,
+        ~onEstablishFlow,
+      ) {
       | Ok(connection) =>
         logConnection(connection)
         Ok(connection)
       | Error(step1Error) =>
+        onEstablishFlow(Log.Connection.EstablishFlow.ConfigCandidatesFailed)
         let pathErrors = Error.Establish.mergeMany([step0Error, step1Error])
-      switch await fromDownloads(platformDeps, memento, globalStorageUri) {
+      switch await fromDownloads(
+        platformDeps,
+        memento,
+        globalStorageUri,
+        ~onEstablishFlow,
+      ) {
       | Ok(connection) =>
         logConnection(connection)
         // Automatic fallback: prepend (lowest priority), do NOT set PreferredCandidate
@@ -716,6 +769,7 @@ module Module: Module = {
         }
         Ok(connection)
       | Error(downloadError) =>
+        onEstablishFlow(Log.Connection.EstablishFlow.ConnectionEstablishFailed)
         Error(Establish(Error.Establish.mergeMany([pathErrors, downloadError])))
       }
       }

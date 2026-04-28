@@ -280,13 +280,25 @@ let switchAgdaVersion = async (state: State.t, selectedPath: string) => {
 
   let onProbeFlow = event =>
     state.channels.log->Chan.emit(Log.Connection(Log.Connection.ProbeFlow(event)))
+  let onEstablishFlow = event =>
+    state.channels.log->Chan.emit(Log.Connection(Log.Connection.EstablishFlow(event)))
+  let establishKind = connection =>
+    switch connection {
+    | Core.Agda(_, _, _) => Log.Connection.EstablishFlow.Agda
+    | Core.ALS(_, _, _) => Log.Connection.EstablishFlow.ALS
+    | Core.ALSWASM(_, _, _, _) => Log.Connection.EstablishFlow.ALSWASM
+    }
 
   switch await Core.fromPathsOrCommands(
     state.platformDeps,
     [(selectedPath, Core.Error.Establish.FromConfig)],
     ~onProbeFlow,
+    ~onEstablishFlow,
   ) {
   | Ok(conn) =>
+    onEstablishFlow(
+      Log.Connection.EstablishFlow.ConnectionEstablished(Core.getPath(conn), establishKind(conn)),
+    )
     Util.log("[ debug ] switchAgdaVersion: connection succeeded", Core.toString(conn))
     await Registry__Connection.shutdown()
 
@@ -325,6 +337,7 @@ let switchAgdaVersion = async (state: State.t, selectedPath: string) => {
     }
     let _ = await Core.destroy(Some(conn), state.channels.log)
   | Error(error) => {
+      onEstablishFlow(Log.Connection.EstablishFlow.ConnectionEstablishFailed)
       let (errorHeader, errorBody) = Core.Error.toString(Establish(error))
       Util.log("[ debug ] switchAgdaVersion: connection failed", errorHeader ++ " | " ++ errorBody)
       let header = AgdaModeVscode.View.Header.Error(

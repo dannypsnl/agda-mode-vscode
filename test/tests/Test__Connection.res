@@ -97,6 +97,31 @@ let probeFlowSnapshot = event =>
     "ProbeFailed:" ++ pathKey ++ ":" ++ Connection__Error.Probe.toString(probeError)
   }
 
+let establishFlowSnapshot = event =>
+  switch event {
+  | Log.Connection.EstablishFlow.ConfigCandidatesStarted(count) =>
+    "ConfigCandidatesStarted:" ++ string_of_int(count)
+  | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
+    "CandidateAttempted:" ++ pathOrCommand ++ ":" ++ Connection.Error.Establish.pathSourceToString(source)
+  | Log.Connection.EstablishFlow.ConfigCandidatesFailed => "ConfigCandidatesFailed"
+  | Log.Connection.EstablishFlow.DownloadFallbackStarted(channel, platform) =>
+    "DownloadFallbackStarted:"
+    ++ Connection__Download__Channel.toString(channel)
+    ++ ":"
+    ++ Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)
+  | Log.Connection.EstablishFlow.DownloadFallbackFailed(_error) => "DownloadFallbackFailed"
+  | Log.Connection.EstablishFlow.ConnectionEstablished(path, kind) =>
+    "ConnectionEstablished:"
+    ++ path
+    ++ ":"
+    ++ switch kind {
+       | Log.Connection.EstablishFlow.Agda => "Agda"
+       | Log.Connection.EstablishFlow.ALS => "ALS"
+       | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
+       }
+  | Log.Connection.EstablishFlow.ConnectionEstablishFailed => "ConnectionEstablishFailed"
+  }
+
 let getAgdaTarget = async () => {
   let platformDeps = Desktop.make()
   switch await Connection.fromPathsOrCommands(
@@ -1018,16 +1043,9 @@ describe("Connection", () => {
          * 1. Setup a mock Agda executable
          * 2. Create Connection.makeWithFallback with log channel
          * 3. Verify ConnectedToAgda event is logged with correct path and version
-         */
-        let loggedEvents = []
+        */
         let logChannel = Chan.make()
-
-        // Subscribe to log channel to capture all log events
-        let _ = logChannel->Chan.on(
-          logEvent => {
-            loggedEvents->Array.push(logEvent)
-          },
-        )
+        let listener = Log.collect(logChannel)
 
         // Setup mock Agda using Test__Util
         let agdaMockPath = await Test__Util.Candidate.Agda.mock(
@@ -1050,6 +1068,7 @@ describe("Connection", () => {
           logChannel,
         ) {
         | Ok(connection) =>
+          let loggedEvents = listener(~filter=Log.isConnection)
           // VERIFY: ConnectedToAgda event was logged with exact details
           Assert.deepStrictEqual(
             loggedEvents,
@@ -1158,15 +1177,8 @@ describe("Connection", () => {
          * 2. Verify no ConnectedTo* events are logged
          * 3. Verify Connection.makeWithFallback returns Error
          */
-        let loggedEvents = []
         let logChannel = Chan.make()
-
-        // Subscribe to log channel to capture all log events
-        let _ = logChannel->Chan.on(
-          logEvent => {
-            loggedEvents->Array.push(logEvent)
-          },
-        )
+        let listener = Log.collect(logChannel)
 
         // Create minimal memento and platformDeps (using mock to avoid dialogs)
         let memento = Memento.make(None)
@@ -1184,7 +1196,8 @@ describe("Connection", () => {
         ) {
         | Ok(_) => Assert.fail("Expected connection to fail")
         | Error(_) =>
-          // VERIFY: No connection events were logged
+          let loggedEvents = listener(~filter=Log.isConnection)
+          // VERIFY: No ConnectedTo* lifecycle events were logged
           Assert.deepStrictEqual(loggedEvents, [])
         }
       },
@@ -1575,6 +1588,7 @@ describe("Connection", () => {
       "should update connection.paths but not PreferredCandidate after automatic fallback download",
       async () => {
         let logChannel = Chan.make()
+        let listener = Log.collect(logChannel)
         await Config.Connection.setAgdaPaths(logChannel, [])
         await Config.Connection.DownloadPolicy.set(Undecided)
         let memento = Memento.make(None)
@@ -1591,6 +1605,28 @@ describe("Connection", () => {
 
         switch result {
         | Ok(connection) =>
+          let establishFlowEvents =
+            listener(~filter=log =>
+              switch log {
+              | Log.Connection(Log.Connection.EstablishFlow(_)) => true
+              | _ => false
+              }
+            )
+            ->Array.filterMap(log =>
+              switch log {
+              | Log.Connection(Log.Connection.EstablishFlow(event)) => Some(event)
+              | _ => None
+              }
+            )
+            ->Array.map(establishFlowSnapshot)
+
+          Assert.deepStrictEqual(establishFlowEvents, [
+            "ConfigCandidatesStarted:1",
+            "CandidateAttempted:/invalid/path:from config",
+            "ConfigCandidatesFailed",
+            "DownloadFallbackStarted:dev:macos-arm64",
+            "ConnectionEstablished:" ++ downloadedAgda.contents ++ ":Agda",
+          ])
           Assert.deepStrictEqual(connection->Connection.getPath, downloadedAgda.contents)
           Assert.deepStrictEqual(
             Config.Connection.getAgdaPaths(),
