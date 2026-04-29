@@ -1208,7 +1208,7 @@ describe("Connection UI", () => {
               "dev",
               "als-dev-Agda-2.8.0-wasm",
             ])
-            let wasmFile = NodeJs.Path.join([artifactDir, "als.wasm"])
+            let wasmFile = NodeJs.Path.join([artifactDir, "als.wasm"])->VSCode.Uri.file->VSCode.Uri.fsPath
             await NodeJs.Fs.mkdir(artifactDir, {recursive: true, mode: 0o777})
             NodeJs.Fs.writeFileSync(wasmFile, NodeJs.Buffer.fromString("mock wasm"))
 

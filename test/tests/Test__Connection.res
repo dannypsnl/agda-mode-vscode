@@ -1381,11 +1381,14 @@ describe("Connection", () => {
               | other => probeFlowSnapshot(other)
               },
           )
+          let Connection__URI.FileURI(_, nonexistentUri) = Connection__URI.parse("/nonexistent/path")
+          let nonexistentUriString = VSCode.Uri.toString(nonexistentUri)
+          let nonexistentFsPath = VSCode.Uri.fsPath(nonexistentUri)
           Assert.deepStrictEqual(probeFlowEvents, [
-            "CandidateResolveStarted:file:///nonexistent/path",
-            "CandidateResolved:file:///nonexistent/path->file:///nonexistent/path",
-            "ProbeStarted:file:///nonexistent/path",
-            "ProbeFailed:/nonexistent/path",
+            "CandidateResolveStarted:" ++ nonexistentUriString,
+            "CandidateResolved:" ++ nonexistentUriString ++ "->" ++ nonexistentUriString,
+            "ProbeStarted:" ++ nonexistentUriString,
+            "ProbeFailed:" ++ nonexistentFsPath,
           ])
 
           let loggedEvents = listener(~filter=Log.isConnection)

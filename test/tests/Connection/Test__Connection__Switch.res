@@ -1309,7 +1309,7 @@ describe("Connection__Switch", () => {
             })
 
           let missingPath = "/__agda_mode_vscode_nonexistent__/binary_should_not_exist_280"
-          let missingUri = VSCode.Uri.file(missingPath)
+          let Connection__URI.FileURI(_, missingUri) = Connection__URI.parse(missingPath)
           let missingPathKey = VSCode.Uri.fsPath(missingUri)
           let missingUriString = VSCode.Uri.toString(missingUri)
           let observedConnections = observeConnectionEvents(state)
