@@ -102,7 +102,7 @@ module Connection = {
     type connectionKind = Agda | ALS | ALSWASM
 
     type t =
-      | ConfigCandidatesStarted(int)
+      | ConfigCandidatesPlanned(int)
       | CandidateAttempted(string, Connection__Error.Establish.pathSource)
       | ConfigCandidatesFailed
       | DownloadFallbackStarted(
@@ -110,12 +110,14 @@ module Connection = {
           Connection__Download__DownloadArtifact.Platform.t,
         )
       | DownloadFallbackFailed(Connection__Error.Establish.t)
-      | ConnectionEstablished(string, connectionKind)
+      // Connection.t object created; outer flows (SwitchUIFlow, ActivationFlow) report operation success
+      | ConnectionCreated(string, connectionKind)
       | ConnectionEstablishFailed
+      | ConnectionFinalizeFailed(string, connectionKind)
 
     let toString = event =>
       switch event {
-      | ConfigCandidatesStarted(count) => "ConfigCandidatesStarted: " ++ string_of_int(count)
+      | ConfigCandidatesPlanned(count) => "ConfigCandidatesPlanned: " ++ string_of_int(count)
       | CandidateAttempted(pathOrCommand, source) =>
         "CandidateAttempted: " ++
         pathOrCommand ++
@@ -130,10 +132,14 @@ module Connection = {
         Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)
       | DownloadFallbackFailed(error) =>
         "DownloadFallbackFailed: " ++ Connection__Error.Establish.toString(error)
-      | ConnectionEstablished(path, Agda) => "ConnectionEstablished: " ++ path ++ " (Agda)"
-      | ConnectionEstablished(path, ALS) => "ConnectionEstablished: " ++ path ++ " (ALS)"
-      | ConnectionEstablished(path, ALSWASM) => "ConnectionEstablished: " ++ path ++ " (ALSWASM)"
+      | ConnectionCreated(path, Agda) => "ConnectionCreated: " ++ path ++ " (Agda)"
+      | ConnectionCreated(path, ALS) => "ConnectionCreated: " ++ path ++ " (ALS)"
+      | ConnectionCreated(path, ALSWASM) => "ConnectionCreated: " ++ path ++ " (ALSWASM)"
       | ConnectionEstablishFailed => "ConnectionEstablishFailed"
+      | ConnectionFinalizeFailed(path, Agda) => "ConnectionFinalizeFailed: " ++ path ++ " (Agda)"
+      | ConnectionFinalizeFailed(path, ALS) => "ConnectionFinalizeFailed: " ++ path ++ " (ALS)"
+      | ConnectionFinalizeFailed(path, ALSWASM) =>
+        "ConnectionFinalizeFailed: " ++ path ++ " (ALSWASM)"
       }
   }
 

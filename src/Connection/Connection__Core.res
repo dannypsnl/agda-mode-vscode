@@ -693,7 +693,7 @@ module Module: Module = {
       logChannel->Chan.emit(
         Log.Connection(
           Log.Connection.EstablishFlow(
-            Log.Connection.EstablishFlow.ConnectionEstablished(getPath(connection), establishKind),
+            Log.Connection.EstablishFlow.ConnectionCreated(getPath(connection), establishKind),
           ),
         ),
       )
@@ -733,7 +733,7 @@ module Module: Module = {
       ->Array.toReversed
       ->Array.map(path => (path, Error.Establish.FromConfig))
     let configCandidateCount = Array.length(preferredEntries) + Array.length(pathsWithSource)
-    onEstablishFlow(Log.Connection.EstablishFlow.ConfigCandidatesStarted(configCandidateCount))
+    onEstablishFlow(Log.Connection.EstablishFlow.ConfigCandidatesPlanned(configCandidateCount))
 
     // Try step 0 (preferred candidate) -> step 1 (config paths) -> download fallback.
     // Command probes are not part of the resolution chain.

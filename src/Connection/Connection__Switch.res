@@ -338,13 +338,18 @@ let switchAgdaVersion = async (state: State.t, selectedPath: string) => {
       | ALSWASM(_, _, _, {alsVersion: None}) => ()
       }
       onEstablishFlow(
-        Log.Connection.EstablishFlow.ConnectionEstablished(Core.getPath(conn), establishKind(conn)),
+        Log.Connection.EstablishFlow.ConnectionCreated(Core.getPath(conn), establishKind(conn)),
       )
       onSwitchUIFlow(Log.Connection.SwitchUIFlow.SwitchSucceeded(Core.getPath(conn)))
       let _ = await Core.destroy(Some(conn), state.channels.log)
     } catch {
     | exn =>
-      onEstablishFlow(Log.Connection.EstablishFlow.ConnectionEstablishFailed)
+      onEstablishFlow(
+        Log.Connection.EstablishFlow.ConnectionFinalizeFailed(
+          Core.getPath(conn),
+          establishKind(conn),
+        ),
+      )
       onSwitchUIFlow(Log.Connection.SwitchUIFlow.SwitchFailed(selectedPath))
       let _ = await Core.destroy(Some(conn), state.channels.log)
       raise(exn)

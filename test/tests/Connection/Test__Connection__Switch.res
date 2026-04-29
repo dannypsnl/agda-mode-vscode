@@ -1428,9 +1428,9 @@ describe("Connection__Switch", () => {
                 Connection.Error.Establish.pathSourceToString(source),
                 "",
               )
-            | Log.Connection.EstablishFlow.ConnectionEstablished(path, kind) =>
+            | Log.Connection.EstablishFlow.ConnectionCreated(path, kind) =>
               (
-                "ConnectionEstablished",
+                "ConnectionCreated",
                 path,
                 switch kind {
                 | Log.Connection.EstablishFlow.Agda => "Agda"
@@ -1462,7 +1462,7 @@ describe("Connection__Switch", () => {
           ])
           Assert.deepStrictEqual(observedEstablishFlow, [
             ("CandidateAttempted", "agda", "from config", ""),
-            ("ConnectionEstablished", mockAgdaFsPath, "Agda", ""),
+            ("ConnectionCreated", mockAgdaFsPath, "Agda", ""),
           ])
           Assert.deepStrictEqual(observedSwitchUIFlow, [
             ("SwitchRequested", "agda"),
@@ -1471,8 +1471,8 @@ describe("Connection__Switch", () => {
 
           let orderedKeys = observedConnections.contents->Array.filterMap(event =>
             switch event {
-            | Log.Connection.EstablishFlow(Log.Connection.EstablishFlow.ConnectionEstablished(path, _)) =>
-              Some("ConnectionEstablished:" ++ path)
+            | Log.Connection.EstablishFlow(Log.Connection.EstablishFlow.ConnectionCreated(path, _)) =>
+              Some("ConnectionCreated:" ++ path)
             | Log.Connection.SwitchUIFlow(Log.Connection.SwitchUIFlow.SwitchSucceeded(path)) =>
               Some("SwitchSucceeded:" ++ path)
             | Log.Connection.Disconnected(path) =>
@@ -1481,7 +1481,7 @@ describe("Connection__Switch", () => {
             }
           )
           Assert.deepStrictEqual(orderedKeys, [
-            "ConnectionEstablished:" ++ mockAgdaFsPath,
+            "ConnectionCreated:" ++ mockAgdaFsPath,
             "SwitchSucceeded:" ++ mockAgdaFsPath,
             "Disconnected:" ++ mockAgdaFsPath,
           ])
@@ -1500,6 +1500,88 @@ describe("Connection__Switch", () => {
             Memento.ResolvedMetadata.get(state.memento, resolved)->Option.map(entry => entry.kind),
             Some(Memento.ResolvedMetadata.Agda(Some("2.7.0.1"))),
           )
+        },
+      )
+
+      Async.it(
+        "should emit ConnectionFinalizeFailed when post-establish finalization throws",
+        async () => {
+          let platform = makeMockPlatformWithBareCommands()
+          let state = createTestStateWithPlatform(platform)
+          let mockAgdaUri = VSCode.Uri.file(mockAgda.contents)
+          let mockAgdaFsPath = VSCode.Uri.fsPath(mockAgdaUri)
+          let observedConnections = observeConnectionEvents(state)
+
+          // Inject a failing setKind to trigger the post-establish catch block
+          let restoreSetKind: unit => unit = %raw(`
+            (() => {
+              const original = Memento$AgdaModeVscode.Module.ResolvedMetadata.setKind;
+              Memento$AgdaModeVscode.Module.ResolvedMetadata.setKind = () => Promise.reject(new Error("finalize injection"));
+              return () => { Memento$AgdaModeVscode.Module.ResolvedMetadata.setKind = original; };
+            })()
+          `)
+
+          let completion =
+            Connection.switchCandidate(state, "agda")
+            ->Promise.catch(_ => Promise.resolve())
+            ->Promise.thenResolve(_ => "done")
+          let timeout = Util.Promise_.setTimeout(1000)->Promise.thenResolve(_ => "timeout")
+          let winner = await Promise.race([completion, timeout])
+
+          try {
+            let observedEstablishFlow = establishFlowEvents(observedConnections)->Array.map(event =>
+              switch event {
+              | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
+                (
+                  "CandidateAttempted",
+                  pathOrCommand,
+                  Connection.Error.Establish.pathSourceToString(source),
+                  "",
+                )
+              | Log.Connection.EstablishFlow.ConnectionFinalizeFailed(path, kind) =>
+                (
+                  "ConnectionFinalizeFailed",
+                  path,
+                  switch kind {
+                  | Log.Connection.EstablishFlow.Agda => "Agda"
+                  | Log.Connection.EstablishFlow.ALS => "ALS"
+                  | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
+                  },
+                  "",
+                )
+              | unexpected =>
+                ("Unexpected", Log.Connection.EstablishFlow.toString(unexpected), "", "")
+              }
+            )
+            let observedSwitchUIFlow = switchUIFlowEvents(observedConnections)->Array.map(event =>
+              switch event {
+              | Log.Connection.SwitchUIFlow.SwitchRequested(path) => ("SwitchRequested", path)
+              | Log.Connection.SwitchUIFlow.SwitchSucceeded(path) => ("SwitchSucceeded", path)
+              | Log.Connection.SwitchUIFlow.SwitchFailed(path) => ("SwitchFailed", path)
+              }
+            )
+
+            switch winner {
+            | "done" =>
+              Assert.deepStrictEqual(observedEstablishFlow, [
+                ("CandidateAttempted", "agda", "from config", ""),
+                ("ConnectionFinalizeFailed", mockAgdaFsPath, "Agda", ""),
+              ])
+              Assert.deepStrictEqual(observedSwitchUIFlow, [
+                ("SwitchRequested", "agda"),
+                ("SwitchFailed", "agda"),
+              ])
+            | "timeout" =>
+              Registry__Connection.status := Empty
+              Assert.fail("switchAgdaVersion hung during post-establish failure")
+            | _ => Assert.fail("Unexpected race result")
+            }
+            restoreSetKind()
+          } catch {
+          | exn =>
+            restoreSetKind()
+            raise(exn)
+          }
         },
       )
 

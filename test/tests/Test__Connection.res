@@ -99,8 +99,8 @@ let probeFlowSnapshot = event =>
 
 let establishFlowSnapshot = event =>
   switch event {
-  | Log.Connection.EstablishFlow.ConfigCandidatesStarted(count) =>
-    "ConfigCandidatesStarted:" ++ string_of_int(count)
+  | Log.Connection.EstablishFlow.ConfigCandidatesPlanned(count) =>
+    "ConfigCandidatesPlanned:" ++ string_of_int(count)
   | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
     "CandidateAttempted:" ++ pathOrCommand ++ ":" ++ Connection.Error.Establish.pathSourceToString(source)
   | Log.Connection.EstablishFlow.ConfigCandidatesFailed => "ConfigCandidatesFailed"
@@ -110,8 +110,8 @@ let establishFlowSnapshot = event =>
     ++ ":"
     ++ Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)
   | Log.Connection.EstablishFlow.DownloadFallbackFailed(_error) => "DownloadFallbackFailed"
-  | Log.Connection.EstablishFlow.ConnectionEstablished(path, kind) =>
-    "ConnectionEstablished:"
+  | Log.Connection.EstablishFlow.ConnectionCreated(path, kind) =>
+    "ConnectionCreated:"
     ++ path
     ++ ":"
     ++ switch kind {
@@ -1340,7 +1340,7 @@ describe("Connection", () => {
           let establishFlowEvents = collectEstablishFlow(listener)
 
           Assert.deepStrictEqual(establishFlowEvents, [
-            "ConfigCandidatesStarted:1",
+            "ConfigCandidatesPlanned:1",
             "CandidateAttempted:/nonexistent/path:from config",
             "ConfigCandidatesFailed",
             "DownloadFallbackStarted:dev:macos-arm64",
@@ -1469,9 +1469,9 @@ describe("Connection", () => {
         switch result {
         | Ok(connection) =>
           Assert.deepStrictEqual(establishFlowEvents, [
-            "ConfigCandidatesStarted:1",
+            "ConfigCandidatesPlanned:1",
             "CandidateAttempted:" ++ agdaMockPath ++ ":from config",
-            "ConnectionEstablished:" ++ agdaMockPath ++ ":Agda",
+            "ConnectionCreated:" ++ agdaMockPath ++ ":Agda",
           ])
           // Should have logged connection to the mock path
           Assert.deepStrictEqual(
@@ -1786,11 +1786,11 @@ describe("Connection", () => {
           let establishFlowEvents = collectEstablishFlow(listener)
 
           Assert.deepStrictEqual(establishFlowEvents, [
-            "ConfigCandidatesStarted:1",
+            "ConfigCandidatesPlanned:1",
             "CandidateAttempted:/invalid/path:from config",
             "ConfigCandidatesFailed",
             "DownloadFallbackStarted:dev:macos-arm64",
-            "ConnectionEstablished:" ++ downloadedAgda.contents ++ ":Agda",
+            "ConnectionCreated:" ++ downloadedAgda.contents ++ ":Agda",
           ])
           Assert.deepStrictEqual(connection->Connection.getPath, downloadedAgda.contents)
           Assert.deepStrictEqual(
