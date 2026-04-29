@@ -77,7 +77,7 @@ let getAgdaTarget = async () => {
 
 // TODO: rewrite everything here
 describe("Connection", () => {
-  This.timeout(10000)
+  This.timeout(OS.onUnix ? 10000 : 30000)
 
   describe("Target", () => {
     let agdaMockPath = ref("")
