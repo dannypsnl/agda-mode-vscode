@@ -38,7 +38,7 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       - name: 📥 Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # actions:
 
@@ -60,7 +60,7 @@ jobs:
       # cached stuff to be restored:
       # - name: 💾 Restore cached stack global package db
       #   id:   stack-global
-      #   uses: actions/cache/restore@v4
+      #   uses: actions/cache/restore@v5
       #   with:
       #     path: ${{ steps.haskell-setup.outputs.stack-root }}
       #     key: ${{ runner.os }}-stack-global-${{ matrix.agda }}
@@ -69,7 +69,7 @@ jobs:
 
       # - name: 💾 Restore stack-installed binaries in ~/.local/bin
       #   id:   stack-binaries
-      #   uses: actions/cache/restore@v4
+      #   uses: actions/cache/restore@v5
       #   with:
       #     path: ${{ env.STACK_LOCAL_BIN  }}
       #     key: ${{ runner.os }}-stack-binaries-${{ matrix.agda }}
@@ -78,7 +78,7 @@ jobs:
         
       - name: 💾 Restore NPM dependencies
         id: npm-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             node_modules
@@ -89,7 +89,7 @@ jobs:
 
       - name: 💾 Restore Agda from ${{ env.DIST }}
         id:   agda-artefacts
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.DIST  }}
           key: ${{ env.DIST  }}-${{ matrix.stack-config }}
@@ -98,7 +98,7 @@ jobs:
         
       - name: 💾 Restore VSCode from .vscode-test
         id:   vscode
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .vscode-test
           key: vscode-${{ runner.os }}-${{ runner.arch }}
@@ -106,7 +106,7 @@ jobs:
               vscode-${{ runner.os }}-
         
       - name: ⏬ Setup Node.js environment
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20.x
       
@@ -175,21 +175,21 @@ jobs:
       # things to be cached
       # - name: 💾 Cache stack global package db
       #   if:   always() && steps.stack-global.outputs.cache-hit != 'true'
-      #   uses: actions/cache/save@v4
+      #   uses: actions/cache/save@v5
       #   with:
       #     path: ${{ steps.haskell-setup.outputs.stack-root }}
       #     key: ${{ steps.stack-global.outputs.cache-primary-key }}
 
       # - name: 💾 Cache stack-installed binaries
       #   if:   always() && steps.stack-binaries.outputs.cache-hit != 'true'
-      #   uses: actions/cache/save@v4
+      #   uses: actions/cache/save@v5
       #   with:
       #     path: ${{ env.STACK_LOCAL_BIN }}
       #     key: ${{ steps.stack-binaries.outputs.cache-primary-key }}
      
       - name: 💾 Cache Agda in ${{ env.DIST  }}
         if:   always() && (steps.agda-artefacts.outputs.cache-hit != 'true' || steps.check-agda.outcome == 'failure')
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ env.DIST  }}
           key: ${{ steps.agda-artefacts.outputs.cache-primary-key }}
@@ -221,14 +221,14 @@ jobs:
 
       - name: 💾 Cache VSCode in .vscode-test
         if:   always() && (steps.vscode.outputs.cache-hit != 'true' || steps.check-vscode-download.outputs.downloaded == 'true')
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .vscode-test
           key: vscode-${{ runner.os }}-${{ runner.arch }}
 
       - name: 💾 Cache NPM dependencies
         if: always() && steps.npm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             node_modules
