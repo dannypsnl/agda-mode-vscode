@@ -113,6 +113,7 @@ module Connection = {
       // Connection.t object created; outer flows (SwitchUIFlow, ActivationFlow) report operation success
       | ConnectionCreated(string, connectionKind)
       | ConnectionEstablishFailed
+      // emitted from the switch path only: connection was created, but post-establish switch finalization failed
       | ConnectionFinalizeFailed(string, connectionKind)
 
     let toString = event =>

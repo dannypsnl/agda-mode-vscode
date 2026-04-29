@@ -120,6 +120,15 @@ let establishFlowSnapshot = event =>
        | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
        }
   | Log.Connection.EstablishFlow.ConnectionEstablishFailed => "ConnectionEstablishFailed"
+  | Log.Connection.EstablishFlow.ConnectionFinalizeFailed(path, kind) =>
+    "ConnectionFinalizeFailed:"
+    ++ path
+    ++ ":"
+    ++ switch kind {
+       | Log.Connection.EstablishFlow.Agda => "Agda"
+       | Log.Connection.EstablishFlow.ALS => "ALS"
+       | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
+       }
   }
 
 let collectConnectionFlowSnapshots = (
@@ -177,6 +186,17 @@ let getAgdaTarget = async () => {
   | Error(_) => failwith("expected to find `agda`")
   }
 }
+
+describe("establishFlowSnapshot", () => {
+  it("should format ConnectionFinalizeFailed correctly", () => {
+    Assert.deepStrictEqual(
+      establishFlowSnapshot(
+        Log.Connection.EstablishFlow.ConnectionFinalizeFailed("/some/path", Log.Connection.EstablishFlow.Agda),
+      ),
+      "ConnectionFinalizeFailed:/some/path:Agda",
+    )
+  })
+})
 
 // TODO: rewrite everything here
 describe("Connection", () => {
