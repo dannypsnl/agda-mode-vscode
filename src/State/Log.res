@@ -66,13 +66,184 @@ module SwitchVersion = {
 }
 
 module Connection = {
+  module ActivationFlow = {
+    type t =
+      | ActivationStarted
+      | ExistingConnectionReused
+      | FreshEstablishStarted
+      | ActivationSucceeded
+      | ActivationFailed
+
+    let toString = event =>
+      switch event {
+      | ActivationStarted => "ActivationStarted"
+      | ExistingConnectionReused => "ExistingConnectionReused"
+      | FreshEstablishStarted => "FreshEstablishStarted"
+      | ActivationSucceeded => "ActivationSucceeded"
+      | ActivationFailed => "ActivationFailed"
+      }
+  }
+
+  module SwitchUIFlow = {
+    type t =
+      | SwitchRequested(string) // selectedPath
+      | SwitchSucceeded(string) // finalPath
+      | SwitchFailed(string) // selectedPath
+
+    let toString = event =>
+      switch event {
+      | SwitchRequested(selectedPath) => "SwitchRequested: " ++ selectedPath
+      | SwitchSucceeded(finalPath) => "SwitchSucceeded: " ++ finalPath
+      | SwitchFailed(selectedPath) => "SwitchFailed: " ++ selectedPath
+      }
+  }
+
+  module EstablishFlow = {
+    type connectionKind = Agda | ALS | ALSWASM
+
+    type t =
+      | ConfigCandidatesPlanned(int)
+      | CandidateAttempted(string, Connection__Error.Establish.pathSource)
+      | ConfigCandidatesFailed
+      | DownloadFallbackStarted(
+          Connection__Download__Channel.t,
+          Connection__Download__DownloadArtifact.Platform.t,
+        )
+      | DownloadFallbackFailed(Connection__Error.Establish.t)
+      // Connection.t object created; outer flows (SwitchUIFlow, ActivationFlow) report operation success
+      | ConnectionCreated(string, connectionKind)
+      | ConnectionEstablishFailed
+      // emitted from the switch path only: connection was created, but post-establish switch finalization failed
+      | ConnectionFinalizeFailed(string, connectionKind)
+
+    let toString = event =>
+      switch event {
+      | ConfigCandidatesPlanned(count) => "ConfigCandidatesPlanned: " ++ string_of_int(count)
+      | CandidateAttempted(pathOrCommand, source) =>
+        "CandidateAttempted: " ++
+        pathOrCommand ++
+        " (" ++
+        Connection__Error.Establish.pathSourceToString(source) ++
+        ")"
+      | ConfigCandidatesFailed => "ConfigCandidatesFailed"
+      | DownloadFallbackStarted(channel, platform) =>
+        "DownloadFallbackStarted: channel=" ++
+        Connection__Download__Channel.toString(channel) ++
+        " platform=" ++
+        Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)
+      | DownloadFallbackFailed(error) =>
+        "DownloadFallbackFailed: " ++ Connection__Error.Establish.toString(error)
+      | ConnectionCreated(path, Agda) => "ConnectionCreated: " ++ path ++ " (Agda)"
+      | ConnectionCreated(path, ALS) => "ConnectionCreated: " ++ path ++ " (ALS)"
+      | ConnectionCreated(path, ALSWASM) => "ConnectionCreated: " ++ path ++ " (ALSWASM)"
+      | ConnectionEstablishFailed => "ConnectionEstablishFailed"
+      | ConnectionFinalizeFailed(path, Agda) => "ConnectionFinalizeFailed: " ++ path ++ " (Agda)"
+      | ConnectionFinalizeFailed(path, ALS) => "ConnectionFinalizeFailed: " ++ path ++ " (ALS)"
+      | ConnectionFinalizeFailed(path, ALSWASM) =>
+        "ConnectionFinalizeFailed: " ++ path ++ " (ALSWASM)"
+      }
+  }
+
+  module ProbeFlow = {
+    type t =
+      | CandidateResolveStarted(Connection__Candidate.t)
+      | CandidateResolved(Connection__Candidate.t, VSCode.Uri.t)
+      | CandidateResolveFailed(Connection__Candidate.t, Connection__Command.Error.t)
+      | ProbeStarted(VSCode.Uri.t)
+      | ProbeClassifiedAsAgda(string, string) // path, agdaVersion
+      | ProbeClassifiedAsALS(string, string, string) // path, alsVersion, agdaVersion
+      | ProbeClassifiedAsALSWASM(string) // pathOrUri
+      | ProbeFailed(string, Connection__Error.Probe.t) // pathKey, error
+
+    let toString = event =>
+      switch event {
+      | CandidateResolveStarted(candidate) =>
+        "CandidateResolveStarted: " ++ Connection__Candidate.toString(candidate)
+      | CandidateResolved(original, resource) =>
+        "CandidateResolved: " ++
+        Connection__Candidate.toString(original) ++
+        " -> " ++
+        VSCode.Uri.toString(resource)
+      | CandidateResolveFailed(original, commandError) =>
+        "CandidateResolveFailed: " ++
+        Connection__Candidate.toString(original) ++
+        " -> " ++
+        Connection__Command.Error.toString(commandError)
+      | ProbeStarted(resource) => "ProbeStarted: " ++ VSCode.Uri.toString(resource)
+      | ProbeClassifiedAsAgda(path, version) =>
+        "ProbeClassifiedAsAgda: " ++ path ++ " (Agda v" ++ version ++ ")"
+      | ProbeClassifiedAsALS(path, alsVersion, agdaVersion) =>
+        "ProbeClassifiedAsALS: " ++
+        path ++
+        " (ALS v" ++
+        alsVersion ++
+        ", Agda v" ++
+        agdaVersion ++
+        ")"
+      | ProbeClassifiedAsALSWASM(pathOrUri) => "ProbeClassifiedAsALSWASM: " ++ pathOrUri
+      | ProbeFailed(pathKey, error) =>
+        "ProbeFailed: " ++ pathKey ++ " -> " ++ Connection__Error.Probe.toString(error)
+      }
+  }
+
+  module DownloadFlow = {
+    type sourceKind = Managed | GitHub | URL
+
+    type t =
+      | SelectionRequested(
+          Connection__Download__Channel.t,
+          Connection__Download__DownloadArtifact.Platform.t,
+          string,
+          bool,
+        ) // channel, platform, versionString, alreadyDownloaded
+      | ManagedHit(string, string) // versionString, path
+      | ManagedMiss(string) // versionString
+      | SourceResolved(sourceKind, string) // sourceKind, versionString
+      | ReusedExistingArtifact(string) // path
+      | DownloadStarted(
+          Connection__Download__Channel.t,
+          Connection__Download__DownloadArtifact.Platform.t,
+          string,
+        ) // channel, platform, versionString
+      | DownloadSucceeded(string) // path
+      | DownloadFailed(string) // errorMsg
+      | FallbackChosen(string) // versionString
+
+    let toString = event =>
+      switch event {
+      | SelectionRequested(channel, platform, vs, downloaded) =>
+        `SelectionRequested: channel=${Connection__Download__Channel.toString(channel)} platform=${Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)} version=${vs} downloaded=${string_of_bool(downloaded)}`
+      | ManagedHit(vs, path) => `ManagedHit: ${vs} at ${path}`
+      | ManagedMiss(vs) => `ManagedMiss: ${vs}`
+      | SourceResolved(Managed, vs) => `SourceResolved(Managed): ${vs}`
+      | SourceResolved(GitHub, vs) => `SourceResolved(GitHub): ${vs}`
+      | SourceResolved(URL, vs) => `SourceResolved(URL): ${vs}`
+      | ReusedExistingArtifact(path) => `ReusedExistingArtifact: ${path}`
+      | DownloadStarted(channel, platform, vs) =>
+        `DownloadStarted: channel=${Connection__Download__Channel.toString(channel)} platform=${Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)} version=${vs}`
+      | DownloadSucceeded(path) => `DownloadSucceeded: ${path}`
+      | DownloadFailed(msg) => `DownloadFailed: ${msg}`
+      | FallbackChosen(vs) => `FallbackChosen: ${vs}`
+      }
+  }
+
   type t =
+    | ActivationFlow(ActivationFlow.t) // top-level activation/acquisition flow
+    | SwitchUIFlow(SwitchUIFlow.t) // top-level switch-ui intent/result flow
+    | EstablishFlow(EstablishFlow.t) // top-level connection-establishment flow
+    | ProbeFlow(ProbeFlow.t) // structured probe / candidate-resolution observability event
+    | DownloadFlow(DownloadFlow.t) // structured download flow observability event
     | ConnectedToAgda(string, string) // path, version
     | ConnectedToALS(string, option<(string, string)>) // path, ALS version, Agda version
     | Disconnected(string) // path
 
   let toString = event =>
     switch event {
+    | ActivationFlow(event) => "[ ActivationFlow   ] " ++ ActivationFlow.toString(event)
+    | SwitchUIFlow(event) => "[ SwitchUIFlow    ] " ++ SwitchUIFlow.toString(event)
+    | EstablishFlow(event) => "[ EstablishFlow    ] " ++ EstablishFlow.toString(event)
+    | ProbeFlow(event) => "[ ProbeFlow        ] " ++ ProbeFlow.toString(event)
+    | DownloadFlow(event) => "[ DownloadFlow     ] " ++ DownloadFlow.toString(event)
     | ConnectedToAgda(path, version) => `ConnectedToAgda: ${path} - Agda v${version}`
     | ConnectedToALS(path, Some(alsVersion, agdaVersion)) =>
       `ConnectedToALS: ${path} - Agda v${agdaVersion} Language Server v${alsVersion}`
@@ -146,7 +317,9 @@ let isConfig = log =>
 
 let isConnection = log =>
   switch log {
-  | Connection(_) => true
+  | Connection(Connection.ConnectedToAgda(_, _))
+  | Connection(Connection.ConnectedToALS(_, _))
+  | Connection(Connection.Disconnected(_)) => true
   | _ => false
   }
 

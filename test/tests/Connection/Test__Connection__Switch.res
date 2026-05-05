@@ -794,6 +794,18 @@ describe("Connection__Switch", () => {
       let createTestStateWithPlatform = (platform: Platform.t) =>
         createTestStateWithPlatformAndStorage(platform, VSCode.Uri.file(NodeJs.Os.tmpdir()))
 
+      let observeProbeFlow = (state: State.t) => {
+        let events: ref<array<Log.Connection.ProbeFlow.t>> = ref([])
+        let _ = state.channels.log->Chan.on(logEvent =>
+          switch logEvent {
+          | Log.Connection(Log.Connection.ProbeFlow(event)) =>
+            events.contents = Array.concat(events.contents, [event])
+          | _ => ()
+          }
+        )
+        events
+      }
+
       Async.it(
         "should write probe metadata under resolved identity for bare command candidates",
         async () => {
@@ -876,6 +888,8 @@ describe("Connection__Switch", () => {
               }
             )
 
+          let probeFlowEvents = observeProbeFlow(state)
+
           let changed = await Connection__Switch.SwitchVersionManager.probeVersions(
             manager,
             platform,
@@ -885,10 +899,60 @@ describe("Connection__Switch", () => {
             original: Connection__Candidate.make(devALSPath),
             resource: VSCode.Uri.file(devALSPath),
           }
+          let expectedCandidate = Connection__Candidate.make(devALSPath)
+          let expectedResolvedResource = switch expectedCandidate {
+          | Connection__Candidate.Resource(uri) => uri
+          | Connection__Candidate.Command(_) =>
+            raise(Failure("Expected DevALS path candidate to parse as resource"))
+          }
+          let observedProbeFlow =
+            probeFlowEvents.contents->Array.map(event =>
+              switch event {
+              | Log.Connection.ProbeFlow.CandidateResolveStarted(candidate) =>
+                ("CandidateResolveStarted", Connection__Candidate.toString(candidate), "", "")
+              | Log.Connection.ProbeFlow.CandidateResolved(candidate, resource) =>
+                (
+                  "CandidateResolved",
+                  Connection__Candidate.toString(candidate),
+                  VSCode.Uri.toString(resource),
+                  "",
+                )
+              | Log.Connection.ProbeFlow.ProbeStarted(resource) =>
+                ("ProbeStarted", VSCode.Uri.toString(resource), "", "")
+              | Log.Connection.ProbeFlow.ProbeClassifiedAsALS(path, alsVersion, agdaVersion) =>
+                ("ProbeClassifiedAsALS", path, alsVersion, agdaVersion)
+              | unexpected =>
+                ("Unexpected", Log.Connection.ProbeFlow.toString(unexpected), "", "")
+              }
+            )
 
           Assert.deepStrictEqual(
             preProbeKind,
             Some(Memento.ResolvedMetadata.ALS(Native, Some(("dev", "2.8.0", None)))),
+          )
+          Assert.deepStrictEqual(
+            observedProbeFlow,
+            [
+              (
+                "CandidateResolveStarted",
+                Connection__Candidate.toString(expectedCandidate),
+                "",
+                "",
+              ),
+              (
+                "CandidateResolved",
+                Connection__Candidate.toString(expectedCandidate),
+                VSCode.Uri.toString(expectedResolvedResource),
+                "",
+              ),
+              ("ProbeStarted", VSCode.Uri.toString(expectedResolvedResource), "", ""),
+              (
+                "ProbeClassifiedAsALS",
+                VSCode.Uri.fsPath(expectedResolvedResource),
+                "1.2.3",
+                "2.8.0",
+              ),
+            ],
           )
           Assert.deepStrictEqual(changed, true)
           Assert.deepStrictEqual(
@@ -943,6 +1007,170 @@ describe("Connection__Switch", () => {
 
           await Config.Connection.setAgdaPaths(state.channels.log, previousPaths)
           let _ = await FS.deleteRecursive(VSCode.Uri.file(storagePath))
+        },
+      )
+
+      Async.it(
+        "should emit ProbeFlow events including ProbeFailed when probing a non-executable file",
+        async () => {
+          let nonExecPath = NodeJs.Path.join([
+            NodeJs.Os.tmpdir(),
+            "agda-probe-fail-test-" ++ string_of_int(int_of_float(Js.Date.now())) ++ ".txt",
+          ])
+          NodeJs.Fs.writeFileSync(nonExecPath, NodeJs.Buffer.fromString("not an executable"))
+
+          let platform = makeMockPlatform()
+          let state = createTestStateWithPlatform(platform)
+          let manager = Connection__Switch.SwitchVersionManager.make(state)
+          let previousPaths = Config.Connection.getAgdaPaths()
+          let probeFlowEvents = observeProbeFlow(state)
+
+          await Config.Connection.setAgdaPaths(state.channels.log, [nonExecPath])
+
+          let changed = await Connection__Switch.SwitchVersionManager.probeVersions(
+            manager,
+            platform,
+          )
+
+          let pathKey = VSCode.Uri.fsPath(VSCode.Uri.file(nonExecPath))
+          let resourceUri = VSCode.Uri.toString(VSCode.Uri.file(nonExecPath))
+          let resolved: Connection__Candidate.Resolved.t = {
+            original: Connection__Candidate.make(nonExecPath),
+            resource: VSCode.Uri.file(nonExecPath),
+          }
+
+          let observedProbeFlow =
+            probeFlowEvents.contents->Array.map(event =>
+              switch event {
+              | Log.Connection.ProbeFlow.CandidateResolveStarted(candidate) =>
+                ("CandidateResolveStarted", Connection__Candidate.toString(candidate), "", "")
+              | Log.Connection.ProbeFlow.CandidateResolved(candidate, resource) =>
+                (
+                  "CandidateResolved",
+                  Connection__Candidate.toString(candidate),
+                  VSCode.Uri.toString(resource),
+                  "",
+                )
+              | Log.Connection.ProbeFlow.ProbeStarted(resource) =>
+                ("ProbeStarted", VSCode.Uri.toString(resource), "", "")
+              | Log.Connection.ProbeFlow.ProbeFailed(pk, _error) =>
+                ("ProbeFailed", pk, "", "")
+              | unexpected =>
+                ("Unexpected", Log.Connection.ProbeFlow.toString(unexpected), "", "")
+              }
+            )
+
+          let mementoEntry = Memento.ResolvedMetadata.get(state.memento, resolved)
+
+          let testResult = try {
+            Assert.deepStrictEqual(
+              observedProbeFlow,
+              [
+                ("CandidateResolveStarted", resourceUri, "", ""),
+                ("CandidateResolved", resourceUri, resourceUri, ""),
+                ("ProbeStarted", resourceUri, "", ""),
+                ("ProbeFailed", pathKey, "", ""),
+              ],
+            )
+            Assert.deepStrictEqual(changed, true)
+            Assert.deepStrictEqual(
+              mementoEntry->Option.map(e => e.kind),
+              Some(Memento.ResolvedMetadata.Unknown),
+            )
+            Assert.deepStrictEqual(
+              mementoEntry->Option.map(e => Option.isSome(e.error)),
+              Some(true),
+            )
+            Ok(())
+          } catch {
+          | _ as e => Error(e)
+          }
+
+          await Config.Connection.setAgdaPaths(state.channels.log, previousPaths)
+          try { NodeJs.Fs.unlinkSync(nonExecPath) } catch { | _ => () }
+
+          switch testResult {
+          | Ok(_) => ()
+          | Error(e) => raise(e)
+          }
+        },
+      )
+
+      Async.it(
+        "should emit CandidateResolveFailed ProbeFlow event when a bare command cannot be resolved",
+        async () => {
+          let bareCommand = "agda-probe-command-fail-test"
+          let platform = makeMockPlatform()
+          let state = createTestStateWithPlatform(platform)
+          let manager = Connection__Switch.SwitchVersionManager.make(state)
+          let previousPaths = Config.Connection.getAgdaPaths()
+
+          let unrelatedResolved: Connection__Candidate.Resolved.t = {
+            original: Connection__Candidate.make("/usr/bin/agda-unrelated"),
+            resource: VSCode.Uri.file("/usr/bin/agda-unrelated"),
+          }
+          await Memento.ResolvedMetadata.setKind(
+            state.memento,
+            unrelatedResolved,
+            Memento.ResolvedMetadata.Agda(Some("2.6.0")),
+          )
+
+          let probeFlowEvents = observeProbeFlow(state)
+
+          await Config.Connection.setAgdaPaths(state.channels.log, [bareCommand])
+
+          let changed = await Connection__Switch.SwitchVersionManager.probeVersions(
+            manager,
+            platform,
+          )
+
+          let observedProbeFlow =
+            probeFlowEvents.contents->Array.map(event =>
+              switch event {
+              | Log.Connection.ProbeFlow.CandidateResolveStarted(candidate) =>
+                ("CandidateResolveStarted", Connection__Candidate.toString(candidate), "", "")
+              | Log.Connection.ProbeFlow.CandidateResolveFailed(candidate, error) =>
+                (
+                  "CandidateResolveFailed",
+                  Connection__Candidate.toString(candidate),
+                  Connection__Command.Error.toString(error),
+                  "",
+                )
+              | unexpected =>
+                ("Unexpected", Log.Connection.ProbeFlow.toString(unexpected), "", "")
+              }
+            )
+
+          let testResult = try {
+            Assert.deepStrictEqual(
+              observedProbeFlow,
+              [
+                ("CandidateResolveStarted", bareCommand, "", ""),
+                ("CandidateResolveFailed", bareCommand, "Command not found", ""),
+              ],
+            )
+            Assert.deepStrictEqual(changed, true)
+            Assert.deepStrictEqual(
+              Memento.ResolvedMetadata.get(state.memento, unrelatedResolved)->Option.map(
+                e => e.kind,
+              ),
+              Some(Memento.ResolvedMetadata.Agda(Some("2.6.0"))),
+            )
+            Assert.deepStrictEqual(
+              Array.length(Memento.ResolvedMetadata.entries(state.memento)->Dict.toArray),
+              1,
+            )
+            Ok(())
+          } catch {
+          | _ as e => Error(e)
+          }
+
+          await Config.Connection.setAgdaPaths(state.channels.log, previousPaths)
+
+          switch testResult {
+          | Ok(_) => ()
+          | Error(e) => raise(e)
+          }
         },
       )
     })
@@ -1029,6 +1257,42 @@ describe("Connection__Switch", () => {
 
       let createTestState = () => createTestStateWithPlatform(makeMockPlatform())
 
+      let observeConnectionEvents = (state: State.t): ref<array<Log.Connection.t>> => {
+        let events: ref<array<Log.Connection.t>> = ref([])
+        let _ = state.channels.log->Chan.on(logEvent =>
+          switch logEvent {
+          | Log.Connection(connectionEvent) =>
+            events.contents = Array.concat(events.contents, [connectionEvent])
+          | _ => ()
+          }
+        )
+        events
+      }
+
+      let probeFlowEvents = (observedConnections: ref<array<Log.Connection.t>>) =>
+        observedConnections.contents->Array.filterMap(connectionEvent =>
+          switch connectionEvent {
+          | Log.Connection.ProbeFlow(event) => Some(event)
+          | _ => None
+          }
+        )
+
+      let establishFlowEvents = (observedConnections: ref<array<Log.Connection.t>>) =>
+        observedConnections.contents->Array.filterMap(connectionEvent =>
+          switch connectionEvent {
+          | Log.Connection.EstablishFlow(event) => Some(event)
+          | _ => None
+          }
+        )
+
+      let switchUIFlowEvents = (observedConnections: ref<array<Log.Connection.t>>) =>
+        observedConnections.contents->Array.filterMap(connectionEvent =>
+          switch connectionEvent {
+          | Log.Connection.SwitchUIFlow(event) => Some(event)
+          | _ => None
+          }
+        )
+
       Async.it(
         "should keep existing shared connection when switch target cannot be established",
         async () => {
@@ -1045,13 +1309,71 @@ describe("Connection__Switch", () => {
             })
 
           let missingPath = "/__agda_mode_vscode_nonexistent__/binary_should_not_exist_280"
+          let Connection__URI.FileURI(_, missingUri) = Connection__URI.parse(missingPath)
+          let missingPathKey = VSCode.Uri.fsPath(missingUri)
+          let missingUriString = VSCode.Uri.toString(missingUri)
+          let observedConnections = observeConnectionEvents(state)
+
           let completion =
             Connection.switchCandidate(state, missingPath)->Promise.thenResolve(_ => "done")
           let timeout = Util.Promise_.setTimeout(1000)->Promise.thenResolve(_ => "timeout")
           let winner = await Promise.race([completion, timeout])
 
+          let observedProbeFlow = probeFlowEvents(observedConnections)->Array.map(event =>
+            switch event {
+            | Log.Connection.ProbeFlow.CandidateResolveStarted(candidate) =>
+              ("CandidateResolveStarted", Connection__Candidate.toString(candidate), "", "")
+            | Log.Connection.ProbeFlow.CandidateResolved(candidate, resource) =>
+              ("CandidateResolved", Connection__Candidate.toString(candidate), VSCode.Uri.toString(resource), "")
+            | Log.Connection.ProbeFlow.ProbeStarted(resource) =>
+              ("ProbeStarted", VSCode.Uri.toString(resource), "", "")
+            | Log.Connection.ProbeFlow.ProbeFailed(pk, _error) =>
+              ("ProbeFailed", pk, "", "")
+            | unexpected =>
+              ("Unexpected", Log.Connection.ProbeFlow.toString(unexpected), "", "")
+            }
+          )
+          let observedEstablishFlow = establishFlowEvents(observedConnections)->Array.map(event =>
+            switch event {
+            | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
+              (
+                "CandidateAttempted",
+                pathOrCommand,
+                Connection.Error.Establish.pathSourceToString(source),
+              )
+            | Log.Connection.EstablishFlow.ConnectionEstablishFailed =>
+              ("ConnectionEstablishFailed", "", "")
+            | unexpected =>
+              ("Unexpected", Log.Connection.EstablishFlow.toString(unexpected), "")
+            }
+          )
+          let observedSwitchUIFlow = switchUIFlowEvents(observedConnections)->Array.map(event =>
+            switch event {
+            | Log.Connection.SwitchUIFlow.SwitchRequested(path) =>
+              ("SwitchRequested", path)
+            | Log.Connection.SwitchUIFlow.SwitchSucceeded(path) =>
+              ("SwitchSucceeded", path)
+            | Log.Connection.SwitchUIFlow.SwitchFailed(path) =>
+              ("SwitchFailed", path)
+            }
+          )
+
           switch winner {
           | "done" =>
+            Assert.deepStrictEqual(observedProbeFlow, [
+              ("CandidateResolveStarted", missingUriString, "", ""),
+              ("CandidateResolved", missingUriString, missingUriString, ""),
+              ("ProbeStarted", missingUriString, "", ""),
+              ("ProbeFailed", missingPathKey, "", ""),
+            ])
+            Assert.deepStrictEqual(observedEstablishFlow, [
+              ("CandidateAttempted", missingPath, "from config"),
+              ("ConnectionEstablishFailed", "", ""),
+            ])
+            Assert.deepStrictEqual(observedSwitchUIFlow, [
+              ("SwitchRequested", missingPath),
+              ("SwitchFailed", missingPath),
+            ])
             switch Registry__Connection.status.contents {
             | Active(resource) =>
               Assert.deepStrictEqual(Connection.getPath(resource.connection), existingPath)
@@ -1076,7 +1398,93 @@ describe("Connection__Switch", () => {
           let platform = makeMockPlatformWithBareCommands()
           let state = createTestStateWithPlatform(platform)
 
+          let mockAgdaUri = VSCode.Uri.file(mockAgda.contents)
+          let mockAgdaUriString = VSCode.Uri.toString(mockAgdaUri)
+          let mockAgdaFsPath = VSCode.Uri.fsPath(mockAgdaUri)
+          let observedConnections = observeConnectionEvents(state)
+
           await Connection.switchCandidate(state, "agda")
+
+          let observedProbeFlow = probeFlowEvents(observedConnections)->Array.map(event =>
+            switch event {
+            | Log.Connection.ProbeFlow.CandidateResolveStarted(candidate) =>
+              ("CandidateResolveStarted", Connection__Candidate.toString(candidate), "", "")
+            | Log.Connection.ProbeFlow.CandidateResolved(candidate, resource) =>
+              ("CandidateResolved", Connection__Candidate.toString(candidate), VSCode.Uri.toString(resource), "")
+            | Log.Connection.ProbeFlow.ProbeStarted(resource) =>
+              ("ProbeStarted", VSCode.Uri.toString(resource), "", "")
+            | Log.Connection.ProbeFlow.ProbeClassifiedAsAgda(path, version) =>
+              ("ProbeClassifiedAsAgda", path, version, "")
+            | unexpected =>
+              ("Unexpected", Log.Connection.ProbeFlow.toString(unexpected), "", "")
+            }
+          )
+          let observedEstablishFlow = establishFlowEvents(observedConnections)->Array.map(event =>
+            switch event {
+            | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
+              (
+                "CandidateAttempted",
+                pathOrCommand,
+                Connection.Error.Establish.pathSourceToString(source),
+                "",
+              )
+            | Log.Connection.EstablishFlow.ConnectionCreated(path, kind) =>
+              (
+                "ConnectionCreated",
+                path,
+                switch kind {
+                | Log.Connection.EstablishFlow.Agda => "Agda"
+                | Log.Connection.EstablishFlow.ALS => "ALS"
+                | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
+                },
+                "",
+              )
+            | unexpected =>
+              ("Unexpected", Log.Connection.EstablishFlow.toString(unexpected), "", "")
+            }
+          )
+          let observedSwitchUIFlow = switchUIFlowEvents(observedConnections)->Array.map(event =>
+            switch event {
+            | Log.Connection.SwitchUIFlow.SwitchRequested(path) =>
+              ("SwitchRequested", path)
+            | Log.Connection.SwitchUIFlow.SwitchSucceeded(path) =>
+              ("SwitchSucceeded", path)
+            | Log.Connection.SwitchUIFlow.SwitchFailed(path) =>
+              ("SwitchFailed", path)
+            }
+          )
+
+          Assert.deepStrictEqual(observedProbeFlow, [
+            ("CandidateResolveStarted", "agda", "", ""),
+            ("CandidateResolved", "agda", mockAgdaUriString, ""),
+            ("ProbeStarted", mockAgdaUriString, "", ""),
+            ("ProbeClassifiedAsAgda", mockAgdaFsPath, "2.7.0.1", ""),
+          ])
+          Assert.deepStrictEqual(observedEstablishFlow, [
+            ("CandidateAttempted", "agda", "from config", ""),
+            ("ConnectionCreated", mockAgdaFsPath, "Agda", ""),
+          ])
+          Assert.deepStrictEqual(observedSwitchUIFlow, [
+            ("SwitchRequested", "agda"),
+            ("SwitchSucceeded", mockAgdaFsPath),
+          ])
+
+          let orderedKeys = observedConnections.contents->Array.filterMap(event =>
+            switch event {
+            | Log.Connection.EstablishFlow(Log.Connection.EstablishFlow.ConnectionCreated(path, _)) =>
+              Some("ConnectionCreated:" ++ path)
+            | Log.Connection.SwitchUIFlow(Log.Connection.SwitchUIFlow.SwitchSucceeded(path)) =>
+              Some("SwitchSucceeded:" ++ path)
+            | Log.Connection.Disconnected(path) =>
+              Some("Disconnected:" ++ path)
+            | _ => None
+            }
+          )
+          Assert.deepStrictEqual(orderedKeys, [
+            "ConnectionCreated:" ++ mockAgdaFsPath,
+            "SwitchSucceeded:" ++ mockAgdaFsPath,
+            "Disconnected:" ++ mockAgdaFsPath,
+          ])
 
           module PlatformOps = unpack(platform)
           let resolved = switch await Connection__Candidate.resolve(
@@ -1092,6 +1500,88 @@ describe("Connection__Switch", () => {
             Memento.ResolvedMetadata.get(state.memento, resolved)->Option.map(entry => entry.kind),
             Some(Memento.ResolvedMetadata.Agda(Some("2.7.0.1"))),
           )
+        },
+      )
+
+      Async.it(
+        "should emit ConnectionFinalizeFailed when post-establish finalization throws",
+        async () => {
+          let platform = makeMockPlatformWithBareCommands()
+          let state = createTestStateWithPlatform(platform)
+          let mockAgdaUri = VSCode.Uri.file(mockAgda.contents)
+          let mockAgdaFsPath = VSCode.Uri.fsPath(mockAgdaUri)
+          let observedConnections = observeConnectionEvents(state)
+
+          // Inject a failing setKind to trigger the post-establish catch block
+          let restoreSetKind: unit => unit = %raw(`
+            (() => {
+              const original = Memento$AgdaModeVscode.Module.ResolvedMetadata.setKind;
+              Memento$AgdaModeVscode.Module.ResolvedMetadata.setKind = () => Promise.reject(new Error("finalize injection"));
+              return () => { Memento$AgdaModeVscode.Module.ResolvedMetadata.setKind = original; };
+            })()
+          `)
+
+          let completion =
+            Connection.switchCandidate(state, "agda")
+            ->Promise.catch(_ => Promise.resolve())
+            ->Promise.thenResolve(_ => "done")
+          let timeout = Util.Promise_.setTimeout(1000)->Promise.thenResolve(_ => "timeout")
+          let winner = await Promise.race([completion, timeout])
+
+          try {
+            let observedEstablishFlow = establishFlowEvents(observedConnections)->Array.map(event =>
+              switch event {
+              | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
+                (
+                  "CandidateAttempted",
+                  pathOrCommand,
+                  Connection.Error.Establish.pathSourceToString(source),
+                  "",
+                )
+              | Log.Connection.EstablishFlow.ConnectionFinalizeFailed(path, kind) =>
+                (
+                  "ConnectionFinalizeFailed",
+                  path,
+                  switch kind {
+                  | Log.Connection.EstablishFlow.Agda => "Agda"
+                  | Log.Connection.EstablishFlow.ALS => "ALS"
+                  | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
+                  },
+                  "",
+                )
+              | unexpected =>
+                ("Unexpected", Log.Connection.EstablishFlow.toString(unexpected), "", "")
+              }
+            )
+            let observedSwitchUIFlow = switchUIFlowEvents(observedConnections)->Array.map(event =>
+              switch event {
+              | Log.Connection.SwitchUIFlow.SwitchRequested(path) => ("SwitchRequested", path)
+              | Log.Connection.SwitchUIFlow.SwitchSucceeded(path) => ("SwitchSucceeded", path)
+              | Log.Connection.SwitchUIFlow.SwitchFailed(path) => ("SwitchFailed", path)
+              }
+            )
+
+            switch winner {
+            | "done" =>
+              Assert.deepStrictEqual(observedEstablishFlow, [
+                ("CandidateAttempted", "agda", "from config", ""),
+                ("ConnectionFinalizeFailed", mockAgdaFsPath, "Agda", ""),
+              ])
+              Assert.deepStrictEqual(observedSwitchUIFlow, [
+                ("SwitchRequested", "agda"),
+                ("SwitchFailed", "agda"),
+              ])
+            | "timeout" =>
+              Registry__Connection.status := Empty
+              Assert.fail("switchAgdaVersion hung during post-establish failure")
+            | _ => Assert.fail("Unexpected race result")
+            }
+            restoreSetKind()
+          } catch {
+          | exn =>
+            restoreSetKind()
+            raise(exn)
+          }
         },
       )
 

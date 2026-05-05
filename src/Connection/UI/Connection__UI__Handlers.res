@@ -20,6 +20,13 @@ let handleDownload = async (
   state.channels.log->Chan.emit(
     Log.SwitchVersionUI(Log.SwitchVersion.SelectedDownloadAction(downloaded, versionString)),
   )
+  state.channels.log->Chan.emit(
+    Log.Connection(
+      Log.Connection.DownloadFlow(
+        Log.Connection.DownloadFlow.SelectionRequested(channel, platform, versionString, downloaded),
+      ),
+    ),
+  )
 
   if downloaded {
     switch await Connection__Download__ManagedStorage.findCandidateForSelection(
@@ -28,8 +35,27 @@ let handleDownload = async (
       ~platform,
       ~versionString,
     ) {
-    | None => ()
+    | None =>
+      state.channels.log->Chan.emit(
+        Log.Connection(
+          Log.Connection.DownloadFlow(Log.Connection.DownloadFlow.ManagedMiss(versionString)),
+        ),
+      )
     | Some(downloadedPath) =>
+      state.channels.log->Chan.emit(
+        Log.Connection(
+          Log.Connection.DownloadFlow(
+            Log.Connection.DownloadFlow.ManagedHit(versionString, downloadedPath),
+          ),
+        ),
+      )
+      state.channels.log->Chan.emit(
+        Log.Connection(
+          Log.Connection.DownloadFlow(
+            Log.Connection.DownloadFlow.ReusedExistingArtifact(downloadedPath),
+          ),
+        ),
+      )
       await Config.Connection.addAgdaPath(state.channels.log, downloadedPath)
       VSCode.Window.showInformationMessage(
         versionString ++ " is already downloaded",
@@ -39,34 +65,63 @@ let handleDownload = async (
   } else {
     module PlatformOps = unpack(platformDeps)
     let onTrace = event => state.channels.log->Chan.emit(Log.DownloadTrace(event))
-    let downloadResult = switch await Connection__Download__Flow.sourceForSelection(
+    let onFlowEvent = event =>
+      state.channels.log->Chan.emit(Log.Connection(Log.Connection.DownloadFlow(event)))
+    let sourceResult = await Connection__Download__Flow.sourceForSelection(
       state.memento,
       state.globalStorageUri,
       platformDeps,
       ~channel,
       ~platform,
       ~versionString,
-    ) {
-    | Error(error) => Error(error)
-    | Ok(source) => await PlatformOps.download(state.globalStorageUri, source, ~trace=onTrace)
-    }
-
-    switch downloadResult {
+      ~onEvent=onFlowEvent,
+    )
+    switch sourceResult {
     | Error(error) =>
       VSCode.Window.showErrorMessage(
         AgdaModeVscode.Connection__Download__Error.toString(error),
         [],
       )->Promise.done
-    | Ok(downloadedPath) =>
-      await Config.Connection.addAgdaPath(state.channels.log, downloadedPath)
-      switch refreshUI {
-      | Some(refreshFn) => await refreshFn()
-      | None => ()
+    | Ok(source) =>
+      state.channels.log->Chan.emit(
+        Log.Connection(
+          Log.Connection.DownloadFlow(
+            Log.Connection.DownloadFlow.DownloadStarted(channel, platform, versionString),
+          ),
+        ),
+      )
+      let downloadResult = await PlatformOps.download(state.globalStorageUri, source, ~trace=onTrace)
+      switch downloadResult {
+      | Error(error) =>
+        state.channels.log->Chan.emit(
+          Log.Connection(
+            Log.Connection.DownloadFlow(
+              Log.Connection.DownloadFlow.DownloadFailed(
+                AgdaModeVscode.Connection__Download__Error.toString(error),
+              ),
+            ),
+          ),
+        )
+        VSCode.Window.showErrorMessage(
+          AgdaModeVscode.Connection__Download__Error.toString(error),
+          [],
+        )->Promise.done
+      | Ok(downloadedPath) =>
+        state.channels.log->Chan.emit(
+          Log.Connection(
+            Log.Connection.DownloadFlow(Log.Connection.DownloadFlow.DownloadSucceeded(downloadedPath)),
+          ),
+        )
+        await Config.Connection.addAgdaPath(state.channels.log, downloadedPath)
+        switch refreshUI {
+        | Some(refreshFn) => await refreshFn()
+        | None => ()
+        }
+        VSCode.Window.showInformationMessage(
+          versionString ++ " successfully downloaded",
+          [],
+        )->Promise.done
       }
-      VSCode.Window.showInformationMessage(
-        versionString ++ " successfully downloaded",
-        [],
-      )->Promise.done
     }
   }
   state.channels.log->Chan.emit(Log.SwitchVersionUI(Log.SwitchVersion.SelectionCompleted))
@@ -175,7 +230,6 @@ let onSelection = (
             )->Promise.done
           }
         | DownloadAction(downloaded, versionString, platform) =>
-          Util.log("[ debug ] user clicked: download button = " ++ selectedItem.label, "")
           view->Picker.destroy
           await handleDownload(
             state,

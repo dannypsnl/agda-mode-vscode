@@ -1208,6 +1208,65 @@ describe("Download", () => {
       Assert.deepStrictEqual(result, Ok(source))
     })
 
+    Async.it(
+      "sourceForSelection should emit SourceResolved(URL) and no fallback for FromURL sources",
+      async () => {
+        let source = Connection__Download__Source.FromURL(
+          Connection__Download__Channel.DevALS,
+          "https://example.invalid/als.wasm",
+          "dev-als",
+        )
+        let sourceVersion = Connection__Download__Source.toVersionString(source)
+        let platform = makePlatform(Connection__Download__Platform.Web, source)
+
+        let events: array<Log.Connection.DownloadFlow.t> = []
+        let result = await Connection__Download__Flow.sourceForSelection(
+          Memento.make(None),
+          VSCode.Uri.file("/tmp/agda-flow-url-events"),
+          platform,
+          ~channel=Connection__Download__Channel.DevALS,
+          ~platform=Connection__Download__DownloadArtifact.Platform.Wasm,
+          ~versionString="ignored for URL source",
+          ~onEvent=event => events->Array.push(event),
+        )
+
+        Assert.deepStrictEqual(result, Ok(source))
+        Assert.deepStrictEqual(
+          events,
+          [Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.URL, sourceVersion)],
+        )
+      },
+    )
+
+    Async.it(
+      "sourceForSelection should not emit download lifecycle events when GitHub resolution fails before download",
+      async () => {
+        let nativeAsset = makeAsset("als-dev-Agda-2.8.0-macos-arm64.zip")
+        let release = makeRelease("dev", [nativeAsset])
+        let platform = makePlatform(
+          Connection__Download__Platform.MacOS_Arm,
+          makeGitHubSource(Connection__Download__Channel.DevALS, release, nativeAsset, "dev-als"),
+        )
+
+        let events: array<Log.Connection.DownloadFlow.t> = []
+        let result = await Connection__Download__Flow.sourceForSelection(
+          Memento.make(None),
+          VSCode.Uri.file("/tmp/agda-flow-prefail"),
+          platform,
+          ~channel=Connection__Download__Channel.DevALS,
+          ~platform=Connection__Download__DownloadArtifact.Platform.MacOSArm64,
+          ~versionString="Agda v9.9.9 Language Server (dev build)",
+          ~onEvent=event => events->Array.push(event),
+        )
+
+        Assert.deepStrictEqual(
+          result,
+          Error(Connection__Download__Error.CannotFindCompatibleALSRelease),
+        )
+        Assert.deepStrictEqual(events, [])
+      },
+    )
+
     Async.it("should use canonical LatestALS release assets", async () => {
       let latestAsset = makeAsset("als-v6-Agda-2.8.0-macos-arm64.zip")
       let release = makeRelease("v6", [
@@ -1235,6 +1294,67 @@ describe("Download", () => {
         "als-v6-Agda-2.8.0-macos-arm64.zip",
       )
     })
+
+    Async.it(
+      "sourceForSelection should emit SourceResolved(GitHub) via onEvent callback for matching asset",
+      async () => {
+        let nativeAsset = makeAsset("als-dev-Agda-2.8.0-macos-arm64.zip")
+        let wasmAsset = makeAsset("als-dev-Agda-2.8.0-wasm.wasm")
+        let release = makeRelease("dev", [nativeAsset, wasmAsset])
+        let platform = makePlatform(
+          Connection__Download__Platform.MacOS_Arm,
+          makeGitHubSource(Connection__Download__Channel.DevALS, release, nativeAsset, "dev-als"),
+        )
+
+        let events: array<Log.Connection.DownloadFlow.t> = []
+        let _ = await Connection__Download__Flow.sourceForSelection(
+          Memento.make(None),
+          VSCode.Uri.file("/tmp/agda-flow-onEvent"),
+          platform,
+          ~channel=Connection__Download__Channel.DevALS,
+          ~platform=Connection__Download__DownloadArtifact.Platform.Wasm,
+          ~versionString="Agda v2.8.0 Language Server (dev build)",
+          ~onEvent=event => events->Array.push(event),
+        )
+
+        Assert.deepStrictEqual(
+          events,
+          [Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.GitHub, "Agda v2.8.0 Language Server (dev build)")],
+        )
+      },
+    )
+
+    Async.it(
+      "sourceForSelection should emit FallbackChosen when native not found but WASM exists",
+      async () => {
+        let wasmAsset = makeAsset("als-dev-Agda-2.8.0-wasm.wasm")
+        let nativeAsset = makeAsset("als-dev-Agda-2.8.0-macos-arm64.zip")
+        let release = makeRelease("dev", [nativeAsset, wasmAsset])
+        let platform = makePlatform(
+          Connection__Download__Platform.MacOS_Arm,
+          makeGitHubSource(Connection__Download__Channel.DevALS, release, nativeAsset, "dev-als"),
+        )
+
+        let events: array<Log.Connection.DownloadFlow.t> = []
+        let _ = await Connection__Download__Flow.sourceForSelection(
+          Memento.make(None),
+          VSCode.Uri.file("/tmp/agda-flow-fallback"),
+          platform,
+          ~channel=Connection__Download__Channel.DevALS,
+          ~platform=Connection__Download__DownloadArtifact.Platform.MacOSArm64,
+          ~versionString="Agda v9.9.9 Language Server (dev build)",
+          ~onEvent=event => events->Array.push(event),
+        )
+
+        Assert.deepStrictEqual(
+          events,
+          [
+            Log.Connection.DownloadFlow.FallbackChosen("Agda v2.8.0 Language Server (dev build)"),
+            Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.GitHub, "Agda v2.8.0 Language Server (dev build)"),
+          ],
+        )
+      },
+    )
   })
 
   describe("ManagedStorage.findAnyWasmDownloaded", () => {
@@ -2313,6 +2433,14 @@ describe("Download", () => {
       }
     }
 
+    let collectDownloadFlowEvents = (events: array<Log.t>): array<Log.Connection.DownloadFlow.t> =>
+      events->Array.filterMap(event =>
+        switch event {
+        | Log.Connection(Log.Connection.DownloadFlow(flowEvent)) => Some(flowEvent)
+        | _ => None
+        }
+      )
+
     Async.it(
       "GitHub.download should forward trace to asFile",
       async () => {
@@ -2465,6 +2593,89 @@ describe("Download", () => {
             }
           )
           Assert.deepStrictEqual(hasDownloadTrace, true)
+        })
+      },
+    )
+
+    Async.it(
+      "handleDownload should emit SelectionRequested, SourceResolved(URL), DownloadStarted, DownloadSucceeded for URL-backed source",
+      async () => {
+        await withTempDir("agda-flow-log-url-", async storageUri => {
+          let channels: State.channels = {
+            inputMethod: Chan.make(),
+            responseHandled: Chan.make(),
+            commandHandled: Chan.make(),
+            log: Chan.make(),
+          }
+          let mockEditor: VSCode.TextEditor.t = %raw(`{ document: { fileName: "test.agda" } }`)
+          let mockExtensionUri = VSCode.Uri.file(NodeJs.Process.cwd(NodeJs.Process.process))
+          let state = State.make(
+            "test-id-flow-url",
+            Mock.Platform.makeBasic(),
+            channels,
+            storageUri,
+            mockExtensionUri,
+            Memento.make(None),
+            mockEditor,
+            None,
+          )
+
+          let logEvents: ref<array<Log.t>> = ref([])
+          let _ = Chan.on(state.channels.log, event => {
+            logEvents := logEvents.contents->Array.concat([event])
+          })
+
+          let urlSource = Connection__Download__Source.FromURL(
+            Connection__Download__Channel.DevALS,
+            "https://example.invalid/dev-als.wasm",
+            "dev-als",
+          )
+          let sourceVersion = Connection__Download__Source.toVersionString(urlSource)
+
+          let platform: Platform.t = {
+            module MockPlatform = {
+              let determinePlatform = async () => Ok(Connection__Download__Platform.MacOS_Arm)
+              let askUserAboutDownloadPolicy = async () => Config.Connection.DownloadPolicy.Yes
+              let alreadyDownloaded = _globalStorageUri => Promise.resolve(None)
+              let resolveDownloadChannel = Mock.DownloadDescriptor.mockWith(_ => Ok(urlSource))
+              let download = (_globalStorageUri, _source, ~trace=Connection__Download__Trace.noop) => {
+                trace(Trace.FetchStarted("https://example.invalid/dev-als.wasm"))
+                Promise.resolve(Ok("/mock/url-backed/path"))
+              }
+              let findCommand = (_command, ~timeout as _timeout=1000) =>
+                Promise.resolve(Error(Connection__Command.Error.NotFound))
+            }
+            module(MockPlatform)
+          }
+
+          let selectedVersionString = "manual URL selection"
+          await Connection__UI__Handlers.handleDownload(
+            state,
+            platform,
+            Connection__Download__DownloadArtifact.Platform.MacOSArm64,
+            false,
+            selectedVersionString,
+            ~channel=Connection__Download__Channel.DevALS,
+          )
+
+          Assert.deepStrictEqual(
+            collectDownloadFlowEvents(logEvents.contents),
+            [
+              Log.Connection.DownloadFlow.SelectionRequested(
+                Connection__Download__Channel.DevALS,
+                Connection__Download__DownloadArtifact.Platform.MacOSArm64,
+                selectedVersionString,
+                false,
+              ),
+              Log.Connection.DownloadFlow.SourceResolved(Log.Connection.DownloadFlow.URL, sourceVersion),
+              Log.Connection.DownloadFlow.DownloadStarted(
+                Connection__Download__Channel.DevALS,
+                Connection__Download__DownloadArtifact.Platform.MacOSArm64,
+                selectedVersionString,
+              ),
+              Log.Connection.DownloadFlow.DownloadSucceeded("/mock/url-backed/path"),
+            ],
+          )
         })
       },
     )

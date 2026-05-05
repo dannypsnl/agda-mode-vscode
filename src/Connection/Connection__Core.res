@@ -33,8 +33,15 @@ module type Module = {
   let fromPathsOrCommands: (
     Platform.t,
     array<(string, Error.Establish.pathSource)>,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=?,
+    ~onEstablishFlow: Log.Connection.EstablishFlow.t => unit=?,
   ) => promise<result<t, Error.Establish.t>>
-  let fromDownloads: (Platform.t, Memento.t, VSCode.Uri.t) => promise<result<t, Error.Establish.t>>
+  let fromDownloads: (
+    Platform.t,
+    Memento.t,
+    VSCode.Uri.t,
+    ~onEstablishFlow: Log.Connection.EstablishFlow.t => unit=?,
+  ) => promise<result<t, Error.Establish.t>>
 
   // messaging
   let sendRequest: (
@@ -51,10 +58,14 @@ module type Module = {
     | IsAgda(string) // Agda version
     | IsALS(string, string, option<Connection__Protocol__LSP__Binding.executableOptions>) // ALS version, Agda version, LSP options
     | IsALSWASM(VSCode.Uri.t) // ALS WASM file
-  let probeFilepath: string => promise<result<(string, probeResult), Error.Probe.t>>
+  let probeFilepath: (
+    string,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=?,
+  ) => promise<result<(string, probeResult), Error.Probe.t>>
   let probeCandidate: (
     Platform.t,
     Candidate.t,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=?,
   ) => promise<result<(Candidate.Resolved.t, probeResult), Error.Establish.t>>
 }
 
@@ -160,19 +171,21 @@ module Module: Module = {
     resolved
   }
 
-  let probeResolved = async (resolved: Candidate.Resolved.t) => {
+  let probeResolved = async (
+    resolved: Candidate.Resolved.t,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
+  ) => {
     let {resource} = resolved
+    onProbeFlow(Log.Connection.ProbeFlow.ProbeStarted(resource))
+
     let resourceString = resource->VSCode.Uri.toString
+    let pathKey = resolvedPathForErrors(resolved)
     // Check if it's a WASM file first (assume all WASM files are ALS)
     // Use URI string for .wasm check since fsPath may mangle non-file schemes (e.g. vscode-userdata:)
     if String.endsWith(resourceString, ".wasm") {
       // For file:// scheme (desktop), use fsPath as the path key
       // For other schemes (web), use the URI string to preserve the scheme
-      let pathKey = if VSCode.Uri.scheme(resource) == "file" {
-        VSCode.Uri.fsPath(resource)
-      } else {
-        resourceString
-      }
+      onProbeFlow(Log.Connection.ProbeFlow.ProbeClassifiedAsALSWASM(pathKey))
       Ok(pathKey, IsALSWASM(resource))
     } else {
       // IMPORTANT: Convert URI to platform-specific file system path
@@ -186,11 +199,20 @@ module Module: Module = {
       | Ok(output) =>
         // try Agda
         switch String.match(output, %re("/Agda version (.*)/")) {
-        | Some([_, Some(version)]) => Ok(fsPath, IsAgda(version))
+        | Some([_, Some(version)]) =>
+          onProbeFlow(Log.Connection.ProbeFlow.ProbeClassifiedAsAgda(fsPath, version))
+          Ok(fsPath, IsAgda(version))
         | _ =>
           // try ALS
           switch String.match(output, %re("/Agda v(.*) Language Server v(.*)/")) {
           | Some([_, Some(agdaVersion), Some(alsVersion)]) =>
+            onProbeFlow(
+              Log.Connection.ProbeFlow.ProbeClassifiedAsALS(
+                fsPath,
+                alsVersion,
+                agdaVersion,
+              ),
+            )
             let lspOptions = switch await checkForPrebuiltDataDirectory(fsPath) {
             | Some(assetPath) =>
               let env = Dict.fromArray([("Agda_datadir", assetPath)])
@@ -198,29 +220,46 @@ module Module: Module = {
             | None => None
             }
             Ok(fsPath, IsALS(alsVersion, agdaVersion, lspOptions))
-          | _ => Error(Error.Probe.NotAgdaOrALS(output))
+          | _ =>
+            let error = Error.Probe.NotAgdaOrALS(output)
+            onProbeFlow(Log.Connection.ProbeFlow.ProbeFailed(pathKey, error))
+            Error(error)
           }
         }
-      | Error(error) => Error(Error.Probe.CannotDetermineAgdaOrALS(error))
+      | Error(error) =>
+        let probeError = Error.Probe.CannotDetermineAgdaOrALS(error)
+        onProbeFlow(Log.Connection.ProbeFlow.ProbeFailed(pathKey, probeError))
+        Error(probeError)
       }
     }
   }
 
   // see if it's a Agda executable or a language server
-  let probeFilepath = async path => await probeResolved(resolvedFromRawResource(path))
+  let probeFilepath = async (path, ~onProbeFlow=_ => ()) =>
+    await probeResolved(resolvedFromRawResource(path), ~onProbeFlow)
 
   let probeCandidate = async (
     platformDeps: Platform.t,
     candidate: Candidate.t,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
   ): result<(Candidate.Resolved.t, probeResult), Error.Establish.t> => {
     module PlatformOps = unpack(platformDeps)
-    switch await Candidate.resolve(PlatformOps.findCommand, candidate) {
+    switch await Candidate.resolve(
+      PlatformOps.findCommand,
+      candidate,
+      ~onCandidateResolveStarted=candidate =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolveStarted(candidate)),
+      ~onCandidateResolved=(original, resource) =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolved(original, resource)),
+      ~onCandidateResolveFailed=(original, commandError) =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolveFailed(original, commandError)),
+    ) {
     | Ok(resolved) =>
       let source = switch resolved.original {
       | Candidate.Command(command) => Error.Establish.FromCommandLookup(command)
       | Candidate.Resource(_) => Error.Establish.FromConfig
       }
-      switch await probeResolved(resolved) {
+      switch await probeResolved(resolved, ~onProbeFlow) {
       | Ok(_, probeResult) => Ok((resolved, probeResult))
       | Error(error) =>
         Error(
@@ -240,11 +279,12 @@ module Module: Module = {
     resolved: Candidate.Resolved.t,
     source: Error.Establish.pathSource,
     ~pathForErrors: string=resolvedPathForErrors(resolved),
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
   ): result<
     t,
     Error.Establish.t,
   > => {
-    switch await probeResolved(resolved) {
+    switch await probeResolved(resolved, ~onProbeFlow) {
     | Ok(path, IsAgda(agdaVersion)) =>
       let connection = await Agda.make(path, agdaVersion)
       Ok(Agda(connection, path, agdaVersion))
@@ -382,15 +422,24 @@ module Module: Module = {
     platformDeps: Platform.t,
     candidate: Candidate.t,
     source: Error.Establish.pathSource,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
   ): result<t, Error.Establish.t> => {
     module PlatformOps = unpack(platformDeps)
-    switch await Candidate.resolve(PlatformOps.findCommand, candidate) {
+    switch await Candidate.resolve(
+      PlatformOps.findCommand,
+      candidate,
+      ~onCandidateResolveStarted=c => onProbeFlow(Log.Connection.ProbeFlow.CandidateResolveStarted(c)),
+      ~onCandidateResolved=(original, resource) =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolved(original, resource)),
+      ~onCandidateResolveFailed=(original, commandError) =>
+        onProbeFlow(Log.Connection.ProbeFlow.CandidateResolveFailed(original, commandError)),
+    ) {
     | Ok(resolved) =>
       let resolvedSource = switch resolved.original {
       | Candidate.Command(command) => Error.Establish.FromCommandLookup(command)
       | Candidate.Resource(_) => source
       }
-      await makeResolved(resolved, resolvedSource)
+      await makeResolved(resolved, resolvedSource, ~onProbeFlow)
     | Error(commandError) =>
       switch candidate {
       | Candidate.Command(command) => Error(Error.Establish.fromCommandError(command, commandError))
@@ -404,10 +453,15 @@ module Module: Module = {
   let fromPathsOrCommands = async (
     platformDeps: Platform.t,
     entries: array<(string, Error.Establish.pathSource)>,
+    ~onProbeFlow: Log.Connection.ProbeFlow.t => unit=_ => (),
+    ~onEstablishFlow: Log.Connection.EstablishFlow.t => unit=_ => (),
   ): result<t, Error.Establish.t> => {
     let tasks = entries->Array.map(((raw, source)) => {
       let candidate = Candidate.make(raw)
-      () => tryCandidate(platformDeps, candidate, source)
+      () => {
+        onEstablishFlow(Log.Connection.EstablishFlow.CandidateAttempted(raw, source))
+        tryCandidate(platformDeps, candidate, source, ~onProbeFlow)
+      }
     })
 
     switch await tryUntilSuccess(tasks) {
@@ -426,11 +480,16 @@ module Module: Module = {
     platformDeps: Platform.t,
     memento: Memento.t,
     globalStorageUri: VSCode.Uri.t,
+    ~onEstablishFlow: Log.Connection.EstablishFlow.t => unit=_ => (),
   ): result<t, Error.Establish.t> => {
     module PlatformOps = unpack(platformDeps)
+    let failDownloadFallback = (error: Error.Establish.t) => {
+      onEstablishFlow(Log.Connection.EstablishFlow.DownloadFallbackFailed(error))
+      Error(error)
+    }
 
     switch await PlatformOps.determinePlatform() {
-    | Error(platform) => Error(Error.Establish.fromDownloadError(PlatformNotSupported(platform)))
+    | Error(platform) => failDownloadFallback(Error.Establish.fromDownloadError(PlatformNotSupported(platform)))
     | Ok(platform) =>
       // On web, always download (no alternatives exist)
       // On desktop, respect user's config
@@ -450,11 +509,15 @@ module Module: Module = {
       | Config.Connection.DownloadPolicy.Undecided =>
         // User cancelled, treat as No
         await Config.Connection.DownloadPolicy.set(No)
-        Error(Error.Establish.fromDownloadError(Connection__Download__Error.OptedNotToDownload))
+        failDownloadFallback(
+          Error.Establish.fromDownloadError(Connection__Download__Error.OptedNotToDownload),
+        )
       | No =>
         // User opted not to download, set policy and return error
         await Config.Connection.DownloadPolicy.set(No)
-        Error(Error.Establish.fromDownloadError(Connection__Download__Error.OptedNotToDownload))
+        failDownloadFallback(
+          Error.Establish.fromDownloadError(Connection__Download__Error.OptedNotToDownload),
+        )
       | Yes =>
         await Config.Connection.DownloadPolicy.set(Yes)
         // Use the selected channel from memento, defaulting to DevALS.
@@ -470,6 +533,12 @@ module Module: Module = {
           | None => Connection__Download__Channel.DevALS
           }
         }
+        onEstablishFlow(
+          Log.Connection.EstablishFlow.DownloadFallbackStarted(
+            channel,
+            Connection__Download__DownloadArtifact.Platform.fromDownloadPlatform(platform),
+          ),
+        )
         // Fresh GitHub downloads can fall back to a WASM asset from the same resolved release.
         // Cached managed downloads use their managed path metadata instead of the selected channel.
         let wasmFallbackSource: ref<option<Connection__Download__Source.t>> = ref(None)
@@ -577,19 +646,21 @@ module Module: Module = {
                 switch await make(wasmPath, source) {
                 | Ok(connection) => Ok(connection)
                 | Error(wasmError) =>
-                  Error(Error.Establish.merge(
-                    {...nativeError, download: Succeeded},
-                    {...wasmError, download: Succeeded},
-                  ))
+                  failDownloadFallback(
+                    Error.Establish.merge(
+                      {...nativeError, download: Succeeded},
+                      {...wasmError, download: Succeeded},
+                    ),
+                  )
                 }
               | Error(_) =>
-                Error({...nativeError, download: Succeeded})
+                failDownloadFallback({...nativeError, download: Succeeded})
               }
             } else {
-              Error({...nativeError, download: Succeeded})
+              failDownloadFallback({...nativeError, download: Succeeded})
             }
           }
-        | Error(error) => Error(error)
+        | Error(error) => failDownloadFallback(error)
         }
       }
     }
@@ -612,6 +683,18 @@ module Module: Module = {
     logChannel: Chan.t<Log.t>,
   ): result<t, Error.t> => {
     let logConnection = connection => {
+      let establishKind = switch connection {
+      | Agda(_, _, _) => Log.Connection.EstablishFlow.Agda
+      | ALS(_, _, _) => Log.Connection.EstablishFlow.ALS
+      | ALSWASM(_, _, _, _) => Log.Connection.EstablishFlow.ALSWASM
+      }
+      logChannel->Chan.emit(
+        Log.Connection(
+          Log.Connection.EstablishFlow(
+            Log.Connection.EstablishFlow.ConnectionCreated(getPath(connection), establishKind),
+          ),
+        ),
+      )
       switch connection {
       | Agda(_, path, version) =>
         logChannel->Chan.emit(Log.Connection(ConnectedToAgda(path, version)))
@@ -627,6 +710,10 @@ module Module: Module = {
     }
 
     let preferredCandidate = Memento.PreferredCandidate.get(memento)
+    let onEstablishFlow = event =>
+      logChannel->Chan.emit(Log.Connection(Log.Connection.EstablishFlow(event)))
+    let onProbeFlow = event =>
+      logChannel->Chan.emit(Log.Connection(Log.Connection.ProbeFlow(event)))
 
     // Step 0: preferred candidate, if present.
     let preferredEntries = switch preferredCandidate {
@@ -643,21 +730,34 @@ module Module: Module = {
       remainingPaths
       ->Array.toReversed
       ->Array.map(path => (path, Error.Establish.FromConfig))
+    let configCandidateCount = Array.length(preferredEntries) + Array.length(pathsWithSource)
+    onEstablishFlow(Log.Connection.EstablishFlow.ConfigCandidatesPlanned(configCandidateCount))
 
     // Try step 0 (preferred candidate) -> step 1 (config paths) -> download fallback.
     // Command probes are not part of the resolution chain.
-    switch await fromPathsOrCommands(platformDeps, preferredEntries) {
+    switch await fromPathsOrCommands(platformDeps, preferredEntries, ~onEstablishFlow, ~onProbeFlow) {
     | Ok(connection) =>
       logConnection(connection)
       Ok(connection)
     | Error(step0Error) =>
-      switch await fromPathsOrCommands(platformDeps, pathsWithSource) {
+      switch await fromPathsOrCommands(
+        platformDeps,
+        pathsWithSource,
+        ~onEstablishFlow,
+        ~onProbeFlow,
+      ) {
       | Ok(connection) =>
         logConnection(connection)
         Ok(connection)
       | Error(step1Error) =>
+        onEstablishFlow(Log.Connection.EstablishFlow.ConfigCandidatesFailed)
         let pathErrors = Error.Establish.mergeMany([step0Error, step1Error])
-      switch await fromDownloads(platformDeps, memento, globalStorageUri) {
+      switch await fromDownloads(
+        platformDeps,
+        memento,
+        globalStorageUri,
+        ~onEstablishFlow,
+      ) {
       | Ok(connection) =>
         logConnection(connection)
         // Automatic fallback: prepend (lowest priority), do NOT set PreferredCandidate
@@ -670,6 +770,7 @@ module Module: Module = {
         }
         Ok(connection)
       | Error(downloadError) =>
+        onEstablishFlow(Log.Connection.EstablishFlow.ConnectionEstablishFailed)
         Error(Establish(Error.Establish.mergeMany([pathErrors, downloadError])))
       }
       }

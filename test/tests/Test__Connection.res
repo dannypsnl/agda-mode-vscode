@@ -64,6 +64,118 @@ let findProbeByLocalPath = (
   )
 }
 
+let resourceFromRawPath = raw =>
+  switch Connection__URI.parse(raw) {
+  | FileURI(_, uri) => uri
+  }
+
+let observeProbeFlow = () => {
+  let events: array<Log.Connection.ProbeFlow.t> = []
+  let onProbeFlow = event => events->Array.push(event)
+  (events, onProbeFlow)
+}
+
+let probeFlowSnapshot = event =>
+  switch event {
+  | Log.Connection.ProbeFlow.CandidateResolveStarted(candidate) =>
+    "CandidateResolveStarted:" ++ Connection__Candidate.toString(candidate)
+  | Log.Connection.ProbeFlow.CandidateResolved(original, resource) =>
+    "CandidateResolved:" ++ Connection__Candidate.toString(original) ++ "->" ++ VSCode.Uri.toString(resource)
+  | Log.Connection.ProbeFlow.CandidateResolveFailed(original, commandError) =>
+    "CandidateResolveFailed:" ++
+    Connection__Candidate.toString(original) ++
+    "->" ++
+    Connection__Command.Error.toString(commandError)
+  | Log.Connection.ProbeFlow.ProbeStarted(resource) => "ProbeStarted:" ++ VSCode.Uri.toString(resource)
+  | Log.Connection.ProbeFlow.ProbeClassifiedAsAgda(path, version) =>
+    "ProbeClassifiedAsAgda:" ++ path ++ ":" ++ version
+  | Log.Connection.ProbeFlow.ProbeClassifiedAsALS(path, alsVersion, agdaVersion) =>
+    "ProbeClassifiedAsALS:" ++ path ++ ":" ++ alsVersion ++ ":" ++ agdaVersion
+  | Log.Connection.ProbeFlow.ProbeClassifiedAsALSWASM(pathOrUri) =>
+    "ProbeClassifiedAsALSWASM:" ++ pathOrUri
+  | Log.Connection.ProbeFlow.ProbeFailed(pathKey, probeError) =>
+    "ProbeFailed:" ++ pathKey ++ ":" ++ Connection__Error.Probe.toString(probeError)
+  }
+
+let establishFlowSnapshot = event =>
+  switch event {
+  | Log.Connection.EstablishFlow.ConfigCandidatesPlanned(count) =>
+    "ConfigCandidatesPlanned:" ++ string_of_int(count)
+  | Log.Connection.EstablishFlow.CandidateAttempted(pathOrCommand, source) =>
+    "CandidateAttempted:" ++ pathOrCommand ++ ":" ++ Connection.Error.Establish.pathSourceToString(source)
+  | Log.Connection.EstablishFlow.ConfigCandidatesFailed => "ConfigCandidatesFailed"
+  | Log.Connection.EstablishFlow.DownloadFallbackStarted(channel, platform) =>
+    "DownloadFallbackStarted:"
+    ++ Connection__Download__Channel.toString(channel)
+    ++ ":"
+    ++ Connection__Download__DownloadArtifact.Platform.toAssetTag(platform)
+  | Log.Connection.EstablishFlow.DownloadFallbackFailed(_error) => "DownloadFallbackFailed"
+  | Log.Connection.EstablishFlow.ConnectionCreated(path, kind) =>
+    "ConnectionCreated:"
+    ++ path
+    ++ ":"
+    ++ switch kind {
+       | Log.Connection.EstablishFlow.Agda => "Agda"
+       | Log.Connection.EstablishFlow.ALS => "ALS"
+       | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
+       }
+  | Log.Connection.EstablishFlow.ConnectionEstablishFailed => "ConnectionEstablishFailed"
+  | Log.Connection.EstablishFlow.ConnectionFinalizeFailed(path, kind) =>
+    "ConnectionFinalizeFailed:"
+    ++ path
+    ++ ":"
+    ++ switch kind {
+       | Log.Connection.EstablishFlow.Agda => "Agda"
+       | Log.Connection.EstablishFlow.ALS => "ALS"
+       | Log.Connection.EstablishFlow.ALSWASM => "ALSWASM"
+       }
+  }
+
+let collectConnectionFlowSnapshots = (
+  listener: (~filter: Log.t => bool=?) => array<Log.t>,
+  pickEvent: Log.Connection.t => option<'event>,
+  toSnapshot: 'event => string,
+): array<string> =>
+  listener()
+  ->Array.filterMap(log =>
+    switch log {
+    | Log.Connection(connectionEvent) => pickEvent(connectionEvent)
+    | _ => None
+    }
+  )
+  ->Array.map(toSnapshot)
+
+let collectEstablishFlow = (listener: (~filter: Log.t => bool=?) => array<Log.t>) =>
+  collectConnectionFlowSnapshots(
+    listener,
+    connectionEvent =>
+      switch connectionEvent {
+      | Log.Connection.EstablishFlow(event) => Some(event)
+      | _ => None
+      },
+    establishFlowSnapshot,
+  )
+
+let activationFlowSnapshot = event =>
+  switch event {
+  | Log.Connection.ActivationFlow.ActivationStarted => "ActivationStarted"
+  | Log.Connection.ActivationFlow.ExistingConnectionReused => "ExistingConnectionReused"
+  | Log.Connection.ActivationFlow.FreshEstablishStarted => "FreshEstablishStarted"
+  | Log.Connection.ActivationFlow.ActivationSucceeded => "ActivationSucceeded"
+  | Log.Connection.ActivationFlow.ActivationFailed => "ActivationFailed"
+  }
+
+let collectActivationFlow = (listener: (~filter: Log.t => bool=?) => array<Log.t>) =>
+  collectConnectionFlowSnapshots(
+    listener,
+    connectionEvent =>
+      switch connectionEvent {
+      | Log.Connection.ActivationFlow(event) => Some(event)
+      | _ => None
+      },
+    activationFlowSnapshot,
+  )
+
 let getAgdaTarget = async () => {
   let platformDeps = Desktop.make()
   switch await Connection.fromPathsOrCommands(
@@ -74,6 +186,17 @@ let getAgdaTarget = async () => {
   | Error(_) => failwith("expected to find `agda`")
   }
 }
+
+describe("establishFlowSnapshot", () => {
+  it("should format ConnectionFinalizeFailed correctly", () => {
+    Assert.deepStrictEqual(
+      establishFlowSnapshot(
+        Log.Connection.EstablishFlow.ConnectionFinalizeFailed("/some/path", Log.Connection.EstablishFlow.Agda),
+      ),
+      "ConnectionFinalizeFailed:/some/path:Agda",
+    )
+  })
+})
 
 // TODO: rewrite everything here
 describe("Connection", () => {
@@ -207,12 +330,17 @@ describe("Connection", () => {
     Async.it(
       "should correctly identify Agda executable",
       async () => {
-        let result = await Connection.probeFilepath(agdaMockPath.contents)
+        let (events, onProbeFlow) = observeProbeFlow()
+        let result = await Connection.probeFilepath(agdaMockPath.contents, ~onProbeFlow)
 
         switch result {
         | Ok(path, IsAgda(version)) =>
           Assert.deepStrictEqual(path, agdaMockPath.contents)
           Assert.deepStrictEqual(version, "2.6.4.1")
+          Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+            "ProbeStarted:" ++ resourceFromRawPath(agdaMockPath.contents)->VSCode.Uri.toString,
+            "ProbeClassifiedAsAgda:" ++ probeKeyForLocalPath(agdaMockPath.contents) ++ ":2.6.4.1",
+          ])
         | Ok(_, _) => Assert.fail("Expected Agda result, got ALS")
         | Error(_) => Assert.fail("Expected successful probe of Agda mock")
         }
@@ -222,7 +350,8 @@ describe("Connection", () => {
     Async.it(
       "should correctly identify ALS executable",
       async () => {
-        let result = await Connection.probeFilepath(alsMockPath.contents)
+        let (events, onProbeFlow) = observeProbeFlow()
+        let result = await Connection.probeFilepath(alsMockPath.contents, ~onProbeFlow)
 
         switch result {
         | Ok(path, IsALS(alsVersion, agdaVersion, lspOptions)) =>
@@ -231,6 +360,12 @@ describe("Connection", () => {
           Assert.deepStrictEqual(agdaVersion, "2.6.4")
           // lspOptions should be None for this mock (no prebuilt data directory)
           Assert.deepStrictEqual(lspOptions, None)
+          Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+            "ProbeStarted:" ++ resourceFromRawPath(alsMockPath.contents)->VSCode.Uri.toString,
+            "ProbeClassifiedAsALS:" ++
+            probeKeyForLocalPath(alsMockPath.contents) ++
+            ":1.2.3:2.6.4",
+          ])
         | Ok(_, _) => Assert.fail("Expected ALS result, got Agda")
         | Error(_) => Assert.fail("Expected successful probe of ALS mock")
         }
@@ -257,14 +392,26 @@ describe("Connection", () => {
           tempFile
         }
 
-        let result = await Connection.probeFilepath(mockPath)
+        let (events, onProbeFlow) = observeProbeFlow()
+        let result = await Connection.probeFilepath(mockPath, ~onProbeFlow)
 
         switch result {
-        | Error(Connection__Error.Probe.NotAgdaOrALS(output)) =>
-          // Trim output to handle potential newline characters
-          Assert.deepStrictEqual(String.trim(output), mockOutput)
+        | Error(probeError) =>
+          switch probeError {
+          | Connection__Error.Probe.NotAgdaOrALS(output) =>
+            // Trim output to handle potential newline characters
+            Assert.deepStrictEqual(String.trim(output), mockOutput)
+          | _ => Assert.fail("Expected NotAgdaOrALS error, got different error")
+          }
+
+          Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+            "ProbeStarted:" ++ resourceFromRawPath(mockPath)->VSCode.Uri.toString,
+            "ProbeFailed:" ++
+            probeKeyForLocalPath(mockPath) ++
+            ":" ++
+            Connection__Error.Probe.toString(probeError),
+          ])
         | Ok(_) => Assert.fail("Expected NotAgdaOrALS error")
-        | Error(_) => Assert.fail("Expected NotAgdaOrALS error, got different error")
         }
 
         // Cleanup
@@ -952,6 +1099,88 @@ describe("Connection", () => {
 
   describe("make with logging", () => {
     Async.it(
+      "State__Connection.sendRequest should log ActivationFlow for reused existing connection",
+      async () => {
+        let ctx = await AgdaMode.makeAndLoad("GoalTypeAndContext.agda")
+        let listener = Log.collect(ctx.channels.log)
+
+        let _ = await ctx.state->State__Connection.sendRequestAndCollectResponses(Request.Load)
+        let activationEvents = collectActivationFlow(listener)
+
+        Assert.deepStrictEqual(activationEvents, [
+          "ActivationStarted",
+          "ExistingConnectionReused",
+          "ActivationSucceeded",
+        ])
+        await ctx->AgdaMode.quit
+      },
+    )
+
+    Async.it(
+      "State__Connection.sendRequest should log ActivationFlow for fresh establish failure",
+      async () => {
+        let configLogChannel = Chan.make()
+        let previousPaths = Config.Connection.getAgdaPaths()
+        let restorePaths = async () => {
+          await Config.Connection.setAgdaPaths(configLogChannel, previousPaths)
+        }
+        await Config.Connection.setAgdaPaths(
+          configLogChannel,
+          ["/__activation_flow_test_nonexistent__/agda"],
+        )
+
+        module FailingPlatform = {
+          let determinePlatform = async () => Ok(Connection__Download__Platform.MacOS_Arm)
+          let askUserAboutDownloadPolicy = async () => Config.Connection.DownloadPolicy.No
+          let alreadyDownloaded = _ => Promise.resolve(None)
+          let resolveDownloadChannel = (_channel, _allowFallback) =>
+            async (_memento, _globalStorageUri, _platform) =>
+              Error(Connection__Download__Error.CannotFindCompatibleALSRelease)
+          let download = (_globalStorageUri, _source, ~trace as _=Connection__Download__Trace.noop) =>
+            Promise.resolve(Error(Connection__Download__Error.CannotFindCompatibleALSRelease))
+          let findCommand = (_command, ~timeout as _timeout=1000) =>
+            Promise.resolve(Error(Connection__Command.Error.NotFound))
+        }
+
+        let channels: State.channels = {
+          inputMethod: Chan.make(),
+          responseHandled: Chan.make(),
+          commandHandled: Chan.make(),
+          log: Chan.make(),
+        }
+        let listener = Log.collect(channels.log)
+        let editor = await File.open_(Path.asset("GoalTypeAndContext.agda"))
+        let state = State.make(
+          "activation-failure-" ++ string_of_int(int_of_float(Js.Date.now())),
+          module(FailingPlatform),
+          channels,
+          VSCode.Uri.file("/tmp/test-storage"),
+          Path.extensionUri,
+          Memento.make(None),
+          editor,
+          None,
+        )
+
+        try {
+          await State__Connection.sendRequest(state, _response => Promise.resolve(), Request.Load)
+          let activationEvents = collectActivationFlow(listener)
+          Assert.deepStrictEqual(activationEvents, [
+            "ActivationStarted",
+            "FreshEstablishStarted",
+            "ActivationFailed",
+          ])
+          let _ = await State.destroy(state, false)
+          await restorePaths()
+        } catch {
+        | exn =>
+          let _ = await State.destroy(state, false)
+          await restorePaths()
+          raise(exn)
+        }
+      },
+    )
+
+    Async.it(
       "should log ConnectedToAgda when Agda connection succeeds",
       async () => {
         /**
@@ -961,16 +1190,9 @@ describe("Connection", () => {
          * 1. Setup a mock Agda executable
          * 2. Create Connection.makeWithFallback with log channel
          * 3. Verify ConnectedToAgda event is logged with correct path and version
-         */
-        let loggedEvents = []
+        */
         let logChannel = Chan.make()
-
-        // Subscribe to log channel to capture all log events
-        let _ = logChannel->Chan.on(
-          logEvent => {
-            loggedEvents->Array.push(logEvent)
-          },
-        )
+        let listener = Log.collect(logChannel)
 
         // Setup mock Agda using Test__Util
         let agdaMockPath = await Test__Util.Candidate.Agda.mock(
@@ -993,6 +1215,7 @@ describe("Connection", () => {
           logChannel,
         ) {
         | Ok(connection) =>
+          let loggedEvents = listener(~filter=Log.isConnection)
           // VERIFY: ConnectedToAgda event was logged with exact details
           Assert.deepStrictEqual(
             loggedEvents,
@@ -1101,19 +1324,26 @@ describe("Connection", () => {
          * 2. Verify no ConnectedTo* events are logged
          * 3. Verify Connection.makeWithFallback returns Error
          */
-        let loggedEvents = []
         let logChannel = Chan.make()
+        let listener = Log.collect(logChannel)
 
-        // Subscribe to log channel to capture all log events
-        let _ = logChannel->Chan.on(
-          logEvent => {
-            loggedEvents->Array.push(logEvent)
-          },
-        )
-
-        // Create minimal memento and platformDeps (using mock to avoid dialogs)
+        // Create minimal memento and platformDeps with deterministic fallback failure
         let memento = Memento.make(None)
-        let platformDeps = Mock.Platform.makeBasic()
+        let platformDeps: Platform.t = {
+          module MockPlatform = {
+            let determinePlatform = async () => Ok(Connection__Download__Platform.MacOS_Arm)
+            let askUserAboutDownloadPolicy = async () => Config.Connection.DownloadPolicy.Yes
+            let alreadyDownloaded = _ => Promise.resolve(None)
+            let resolveDownloadChannel = (_channel, _allowFallback) =>
+              async (_memento, _globalStorageUri, _platform) =>
+                Error(Connection__Download__Error.CannotFindCompatibleALSRelease)
+            let download = (_globalStorageUri, _source, ~trace as _=Connection__Download__Trace.noop) =>
+              Promise.resolve(Error(Connection__Download__Error.CannotFindCompatibleALSRelease))
+            let findCommand = (_command, ~timeout as _timeout=1000) =>
+              Promise.resolve(Error(Connection__Command.Error.NotFound))
+          }
+          module(MockPlatform)
+        }
         let globalStorageUri = VSCode.Uri.file("/tmp/test-storage")
 
         // INVOKE: Connection.makeWithFallback with invalid paths and commands
@@ -1127,7 +1357,42 @@ describe("Connection", () => {
         ) {
         | Ok(_) => Assert.fail("Expected connection to fail")
         | Error(_) =>
-          // VERIFY: No connection events were logged
+          let establishFlowEvents = collectEstablishFlow(listener)
+
+          Assert.deepStrictEqual(establishFlowEvents, [
+            "ConfigCandidatesPlanned:1",
+            "CandidateAttempted:/nonexistent/path:from config",
+            "ConfigCandidatesFailed",
+            "DownloadFallbackStarted:dev:macos-arm64",
+            "DownloadFallbackFailed",
+            "ConnectionEstablishFailed",
+          ])
+
+          let probeFlowEvents = collectConnectionFlowSnapshots(
+            listener,
+            connectionEvent =>
+              switch connectionEvent {
+              | Log.Connection.ProbeFlow(event) => Some(event)
+              | _ => None
+              },
+            event =>
+              switch event {
+              | Log.Connection.ProbeFlow.ProbeFailed(pathKey, _) => "ProbeFailed:" ++ pathKey
+              | other => probeFlowSnapshot(other)
+              },
+          )
+          let Connection__URI.FileURI(_, nonexistentUri) = Connection__URI.parse("/nonexistent/path")
+          let nonexistentUriString = VSCode.Uri.toString(nonexistentUri)
+          let nonexistentFsPath = VSCode.Uri.fsPath(nonexistentUri)
+          Assert.deepStrictEqual(probeFlowEvents, [
+            "CandidateResolveStarted:" ++ nonexistentUriString,
+            "CandidateResolved:" ++ nonexistentUriString ++ "->" ++ nonexistentUriString,
+            "ProbeStarted:" ++ nonexistentUriString,
+            "ProbeFailed:" ++ nonexistentFsPath,
+          ])
+
+          let loggedEvents = listener(~filter=Log.isConnection)
+          // VERIFY: No ConnectedTo* lifecycle events were logged
           Assert.deepStrictEqual(loggedEvents, [])
         }
       },
@@ -1221,10 +1486,16 @@ describe("Connection", () => {
           ["invalid-command"], // invalid commands
           logChannel,
         )
+        let establishFlowEvents = collectEstablishFlow(listener)
         let loggedEvents = listener(~filter=Log.isConnection)
 
         switch result {
         | Ok(connection) =>
+          Assert.deepStrictEqual(establishFlowEvents, [
+            "ConfigCandidatesPlanned:1",
+            "CandidateAttempted:" ++ agdaMockPath ++ ":from config",
+            "ConnectionCreated:" ++ agdaMockPath ++ ":Agda",
+          ])
           // Should have logged connection to the mock path
           Assert.deepStrictEqual(
             loggedEvents,
@@ -1518,6 +1789,7 @@ describe("Connection", () => {
       "should update connection.paths but not PreferredCandidate after automatic fallback download",
       async () => {
         let logChannel = Chan.make()
+        let listener = Log.collect(logChannel)
         await Config.Connection.setAgdaPaths(logChannel, [])
         await Config.Connection.DownloadPolicy.set(Undecided)
         let memento = Memento.make(None)
@@ -1534,6 +1806,15 @@ describe("Connection", () => {
 
         switch result {
         | Ok(connection) =>
+          let establishFlowEvents = collectEstablishFlow(listener)
+
+          Assert.deepStrictEqual(establishFlowEvents, [
+            "ConfigCandidatesPlanned:1",
+            "CandidateAttempted:/invalid/path:from config",
+            "ConfigCandidatesFailed",
+            "DownloadFallbackStarted:dev:macos-arm64",
+            "ConnectionCreated:" ++ downloadedAgda.contents ++ ":Agda",
+          ])
           Assert.deepStrictEqual(connection->Connection.getPath, downloadedAgda.contents)
           Assert.deepStrictEqual(
             Config.Connection.getAgdaPaths(),
@@ -1744,11 +2025,16 @@ describe("Connection", () => {
         // Probe using a file:// URI (as stored in connection.paths for WASM downloads)
         let fileUri = VSCode.Uri.file(wasmPath)
         let uriString = VSCode.Uri.toString(fileUri)
-        let result = await Connection.probeFilepath(uriString)
+        let (events, onProbeFlow) = observeProbeFlow()
+        let result = await Connection.probeFilepath(uriString, ~onProbeFlow)
 
         switch result {
         | Ok((resolvedPath, _probeResult)) =>
           assertLocalPathEqual(resolvedPath, wasmPath)
+          Assert.deepStrictEqual(events->Array.map(probeFlowSnapshot), [
+            "ProbeStarted:" ++ fileUri->VSCode.Uri.toString,
+            "ProbeClassifiedAsALSWASM:" ++ resolvedPath,
+          ])
         | Error(_) => Assert.fail("Expected WASM probe to succeed")
         }
 

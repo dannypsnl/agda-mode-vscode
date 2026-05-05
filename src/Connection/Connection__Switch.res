@@ -6,6 +6,7 @@ module SwitchVersionManager = {
   type t = {
     memento: Memento.t,
     globalStorageUri: VSCode.Uri.t,
+    logChannel: Chan.t<Log.t>,
   }
 
   let inferCandidateKind = (raw: string) => {
@@ -65,6 +66,7 @@ module SwitchVersionManager = {
   let make = (state: State.t): t => {
     memento: state.memento,
     globalStorageUri: state.globalStorageUri,
+    logChannel: state.channels.log,
   }
 
   let getItemData = async (
@@ -149,9 +151,11 @@ module SwitchVersionManager = {
       false
     } else {
       module PlatformOps = unpack(platformDeps)
+      let onProbeFlow = event =>
+        self.logChannel->Chan.emit(Log.Connection(Log.Connection.ProbeFlow(event)))
       let probePromises = pathsToProbe->Array.map(async path => {
         let candidate = Candidate.make(path)
-        switch await Core.probeCandidate(platformDeps, candidate) {
+        switch await Core.probeCandidate(platformDeps, candidate, ~onProbeFlow) {
         | Ok((resolved, IsAgda(agdaVersion))) =>
           await Memento.ResolvedMetadata.setKind(
             self.memento,
@@ -274,49 +278,85 @@ let switchAgdaVersion = async (state: State.t, selectedPath: string) => {
     [],
   )
 
+  let onProbeFlow = event =>
+    state.channels.log->Chan.emit(Log.Connection(Log.Connection.ProbeFlow(event)))
+  let onEstablishFlow = event =>
+    state.channels.log->Chan.emit(Log.Connection(Log.Connection.EstablishFlow(event)))
+  let onSwitchUIFlow = event =>
+    state.channels.log->Chan.emit(Log.Connection(Log.Connection.SwitchUIFlow(event)))
+  let establishKind = connection =>
+    switch connection {
+    | Core.Agda(_, _, _) => Log.Connection.EstablishFlow.Agda
+    | Core.ALS(_, _, _) => Log.Connection.EstablishFlow.ALS
+    | Core.ALSWASM(_, _, _, _) => Log.Connection.EstablishFlow.ALSWASM
+    }
+
+  onSwitchUIFlow(Log.Connection.SwitchUIFlow.SwitchRequested(selectedPath))
+
   switch await Core.fromPathsOrCommands(
     state.platformDeps,
     [(selectedPath, Core.Error.Establish.FromConfig)],
+    ~onProbeFlow,
+    ~onEstablishFlow,
   ) {
   | Ok(conn) =>
-    Util.log("[ debug ] switchAgdaVersion: connection succeeded", Core.toString(conn))
-    await Registry__Connection.shutdown()
+    try {
+      Util.log("[ debug ] switchAgdaVersion: connection succeeded", Core.toString(conn))
+      await Registry__Connection.shutdown()
 
-    await Memento.PreferredCandidate.set(state.memento, Some(selectedPath))
+      await Memento.PreferredCandidate.set(state.memento, Some(selectedPath))
 
-    await State__View.Panel.displayConnectionStatus(state, Some(conn))
-    await State__View.Panel.display(
-      state,
-      AgdaModeVscode.View.Header.Success("Switched to " ++ Core.toString(conn)),
-      [],
-    )
-    switch conn {
-    | Agda(_, path, version) =>
-      let resolved = resolvedFromConnectionPath(path)
-      await Memento.ResolvedMetadata.setKind(
-        state.memento,
-        resolved,
-        ResolvedMetadata.Agda(Some(version)),
+      await State__View.Panel.displayConnectionStatus(state, Some(conn))
+      await State__View.Panel.display(
+        state,
+        AgdaModeVscode.View.Header.Success("Switched to " ++ Core.toString(conn)),
+        [],
       )
-    | ALS(_, path, {alsVersion: Some(v), agdaVersion, lspOptions}) =>
-      let resolved = resolvedFromConnectionPath(path)
-      await Memento.ResolvedMetadata.setKind(
-        state.memento,
-        resolved,
-        ResolvedMetadata.ALS(Native, Some(v, agdaVersion, lspOptions)),
+      switch conn {
+      | Agda(_, path, version) =>
+        let resolved = resolvedFromConnectionPath(path)
+        await Memento.ResolvedMetadata.setKind(
+          state.memento,
+          resolved,
+          ResolvedMetadata.Agda(Some(version)),
+        )
+      | ALS(_, path, {alsVersion: Some(v), agdaVersion, lspOptions}) =>
+        let resolved = resolvedFromConnectionPath(path)
+        await Memento.ResolvedMetadata.setKind(
+          state.memento,
+          resolved,
+          ResolvedMetadata.ALS(Native, Some(v, agdaVersion, lspOptions)),
+        )
+      | ALS(_, _, {alsVersion: None}) => ()
+      | ALSWASM(_, _, path, {alsVersion: Some(v), agdaVersion, lspOptions}) =>
+        let resolved = resolvedFromConnectionPath(path)
+        await Memento.ResolvedMetadata.setKind(
+          state.memento,
+          resolved,
+          ResolvedMetadata.ALS(WASM, Some(v, agdaVersion, lspOptions)),
+        )
+      | ALSWASM(_, _, _, {alsVersion: None}) => ()
+      }
+      onEstablishFlow(
+        Log.Connection.EstablishFlow.ConnectionCreated(Core.getPath(conn), establishKind(conn)),
       )
-    | ALS(_, _, {alsVersion: None}) => ()
-    | ALSWASM(_, _, path, {alsVersion: Some(v), agdaVersion, lspOptions}) =>
-      let resolved = resolvedFromConnectionPath(path)
-      await Memento.ResolvedMetadata.setKind(
-        state.memento,
-        resolved,
-        ResolvedMetadata.ALS(WASM, Some(v, agdaVersion, lspOptions)),
+      onSwitchUIFlow(Log.Connection.SwitchUIFlow.SwitchSucceeded(Core.getPath(conn)))
+      let _ = await Core.destroy(Some(conn), state.channels.log)
+    } catch {
+    | exn =>
+      onEstablishFlow(
+        Log.Connection.EstablishFlow.ConnectionFinalizeFailed(
+          Core.getPath(conn),
+          establishKind(conn),
+        ),
       )
-    | ALSWASM(_, _, _, {alsVersion: None}) => ()
+      onSwitchUIFlow(Log.Connection.SwitchUIFlow.SwitchFailed(selectedPath))
+      let _ = await Core.destroy(Some(conn), state.channels.log)
+      raise(exn)
     }
-    let _ = await Core.destroy(Some(conn), state.channels.log)
   | Error(error) => {
+      onSwitchUIFlow(Log.Connection.SwitchUIFlow.SwitchFailed(selectedPath))
+      onEstablishFlow(Log.Connection.EstablishFlow.ConnectionEstablishFailed)
       let (errorHeader, errorBody) = Core.Error.toString(Establish(error))
       Util.log("[ debug ] switchAgdaVersion: connection failed", errorHeader ++ " | " ++ errorBody)
       let header = AgdaModeVscode.View.Header.Error(
